@@ -11,6 +11,7 @@ Sources:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import cast
 
@@ -94,6 +95,7 @@ class SocketWeldElbowDims:
 
 
 # ASME B16.11 Class 3000 Socket Weld 90° Elbow dimension table
+# Sources: wermac.org, ferrobend.com
 ASME_B1611_ELBOW90_CLASS3000: dict[str, SocketWeldElbowDims] = {
     "1/8": SocketWeldElbowDims(
         center_to_end=9.5,
@@ -206,6 +208,122 @@ ASME_B1611_ELBOW90_CLASS3000: dict[str, SocketWeldElbowDims] = {
 }
 
 
+# ASME B16.11 Class 3000 Socket Weld 45° Elbow dimension table
+# Sources: wermac.org, ferrobend.com
+# Note: Socket dimensions (B, J, D, C, G) are the same as 90° elbows;
+# only center-to-end (A) differs for 45° geometry.
+ASME_B1611_ELBOW45_CLASS3000: dict[str, SocketWeldElbowDims] = {
+    "1/8": SocketWeldElbowDims(
+        center_to_end=8.0,
+        socket_bore_max=11.2,
+        socket_bore_min=10.8,
+        socket_depth=9.5,
+        min_bore=6.1,
+        socket_wall_thickness=3.18,
+        body_wall_thickness=3.18,
+    ),
+    "1/4": SocketWeldElbowDims(
+        center_to_end=8.0,
+        socket_bore_max=14.6,
+        socket_bore_min=14.2,
+        socket_depth=9.5,
+        min_bore=8.5,
+        socket_wall_thickness=3.78,
+        body_wall_thickness=3.78,
+    ),
+    "3/8": SocketWeldElbowDims(
+        center_to_end=8.0,
+        socket_bore_max=18.0,
+        socket_bore_min=17.6,
+        socket_depth=9.5,
+        min_bore=11.8,
+        socket_wall_thickness=4.01,
+        body_wall_thickness=4.01,
+    ),
+    "1/2": SocketWeldElbowDims(
+        center_to_end=11.5,
+        socket_bore_max=22.2,
+        socket_bore_min=21.8,
+        socket_depth=10.0,
+        min_bore=15.0,
+        socket_wall_thickness=4.67,
+        body_wall_thickness=3.75,
+    ),
+    "3/4": SocketWeldElbowDims(
+        center_to_end=12.5,
+        socket_bore_max=27.6,
+        socket_bore_min=27.2,
+        socket_depth=13.0,
+        min_bore=20.2,
+        socket_wall_thickness=4.90,
+        body_wall_thickness=3.90,
+    ),
+    "1": SocketWeldElbowDims(
+        center_to_end=14.0,
+        socket_bore_max=34.3,
+        socket_bore_min=33.9,
+        socket_depth=13.0,
+        min_bore=25.9,
+        socket_wall_thickness=5.69,
+        body_wall_thickness=4.55,
+    ),
+    "1-1/4": SocketWeldElbowDims(
+        center_to_end=17.0,
+        socket_bore_max=43.1,
+        socket_bore_min=42.7,
+        socket_depth=13.0,
+        min_bore=34.3,
+        socket_wall_thickness=6.07,
+        body_wall_thickness=4.85,
+    ),
+    "1-1/2": SocketWeldElbowDims(
+        center_to_end=21.0,
+        socket_bore_max=49.2,
+        socket_bore_min=48.8,
+        socket_depth=13.0,
+        min_bore=40.1,
+        socket_wall_thickness=6.35,
+        body_wall_thickness=5.10,
+    ),
+    "2": SocketWeldElbowDims(
+        center_to_end=25.0,
+        socket_bore_max=61.7,
+        socket_bore_min=61.2,
+        socket_depth=16.0,
+        min_bore=51.7,
+        socket_wall_thickness=6.93,
+        body_wall_thickness=5.55,
+    ),
+    "2-1/2": SocketWeldElbowDims(
+        center_to_end=29.0,
+        socket_bore_max=74.4,
+        socket_bore_min=73.9,
+        socket_depth=16.0,
+        min_bore=61.2,
+        socket_wall_thickness=8.76,
+        body_wall_thickness=7.00,
+    ),
+    "3": SocketWeldElbowDims(
+        center_to_end=31.5,
+        socket_bore_max=90.3,
+        socket_bore_min=89.8,
+        socket_depth=16.0,
+        min_bore=76.4,
+        socket_wall_thickness=9.52,
+        body_wall_thickness=7.60,
+    ),
+    "4": SocketWeldElbowDims(
+        center_to_end=41.5,
+        socket_bore_max=115.7,
+        socket_bore_min=115.2,
+        socket_depth=19.0,
+        min_bore=100.7,
+        socket_wall_thickness=10.69,
+        body_wall_thickness=8.55,
+    ),
+}
+
+
 # =============================================================================
 # ELBOW GEOMETRY
 # =============================================================================
@@ -286,6 +404,111 @@ def make_socket_weld_elbow_90(
         r_bore, A,
         cq.Vector(0, 0, 0),
         cq.Vector(0, 1, 0)
+    )
+    sphere_inner = cq.Solid.makeSphere(
+        r_bore,
+        cq.Vector(0, 0, 0),
+        cq.Vector(0, 0, 1),
+        angleDegrees1=-90,
+        angleDegrees2=90,
+        angleDegrees3=360
+    )
+
+    inner = leg1_inner.fuse(leg2_inner).fuse(sphere_inner)
+
+    # Cut inner from outer to create hollow elbow
+    elbow = outer.cut(inner)
+
+    # Add socket counterbores to end faces
+    elbow = add_socket_counterbores(elbow, r_socket_outer, r_socket_inner, J)
+
+    return elbow
+
+
+def make_socket_weld_elbow_45(
+    nps: str,
+    pressure_class: int = 3000,
+) -> cq.Shape:
+    """
+    Create an ASME B16.11 45° socket weld elbow.
+
+    The elbow is oriented with:
+    - Inlet from +X direction toward origin
+    - Outlet from origin toward +Y direction (45° turn)
+    - A sphere at origin connects the two legs
+
+    Same construction as 90° elbow but with 45° turn angle.
+
+    Args:
+        nps: Nominal pipe size (e.g., "1/2", "2", "4")
+        pressure_class: 3000 or 6000 (only 3000 currently implemented)
+
+    Returns:
+        CadQuery Shape of the elbow
+    """
+    if pressure_class != 3000:
+        raise ValueError(f"Pressure class {pressure_class} not implemented")
+
+    dims = ASME_B1611_ELBOW45_CLASS3000.get(nps)
+    if dims is None:
+        raise ValueError(f"No ASME B16.11 Class {pressure_class} 45° elbow dimensions for NPS {nps}")
+
+    # Get dimensions from ASME B16.11
+    A = dims.center_to_end  # Center to end of socket
+    B = (dims.socket_bore_max + dims.socket_bore_min) / 2.0  # Socket bore diameter
+    C = dims.socket_wall_thickness  # Socket wall thickness
+    D = dims.min_bore  # Flow bore diameter
+    G = dims.body_wall_thickness  # Body wall thickness
+    J = dims.socket_depth  # Socket depth
+
+    # Radii
+    r_bore = D / 2.0  # Flow bore radius
+    r_outer = r_bore + G  # Outer radius of elbow body
+    r_socket_inner = B / 2.0  # Socket bore radius (accepts pipe OD)
+    r_socket_outer = r_socket_inner + C  # Outer radius of socket
+
+    # Direction for outlet leg (45° turn from inlet)
+    # Inlet is along -X (from +X toward origin)
+    # 45° turn toward +Y means outlet direction is at 135° from +X
+    angle_rad = math.radians(135)
+    dir_x = math.cos(angle_rad)  # ~-0.707
+    dir_y = math.sin(angle_rad)  # ~0.707
+
+    # Outer body: two cylinders + full sphere at origin
+    # Leg 1: from (A, 0, 0) to origin along -X
+    leg1_outer = cq.Solid.makeCylinder(
+        r_outer, A,
+        cq.Vector(A, 0, 0),
+        cq.Vector(-1, 0, 0)
+    )
+    # Leg 2: from origin toward outlet direction
+    leg2_outer = cq.Solid.makeCylinder(
+        r_outer, A,
+        cq.Vector(0, 0, 0),
+        cq.Vector(dir_x, dir_y, 0)
+    )
+    # Full sphere at origin
+    sphere_outer = cq.Solid.makeSphere(
+        r_outer,
+        cq.Vector(0, 0, 0),
+        cq.Vector(0, 0, 1),
+        angleDegrees1=-90,
+        angleDegrees2=90,
+        angleDegrees3=360
+    )
+
+    outer = leg1_outer.fuse(leg2_outer).fuse(sphere_outer)
+
+    # Inner bore: same shape with r_bore
+    leg1_inner = cq.Solid.makeCylinder(
+        r_bore, A,
+        cq.Vector(A, 0, 0),
+        cq.Vector(-1, 0, 0)
+    )
+    leg2_inner = cq.Solid.makeCylinder(
+        r_bore, A,
+        cq.Vector(0, 0, 0),
+        cq.Vector(dir_x, dir_y, 0)
     )
     sphere_inner = cq.Solid.makeSphere(
         r_bore,

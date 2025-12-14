@@ -48,7 +48,12 @@ from dataclasses import dataclass, field
 import cadquery as cq
 import numpy as np
 
-from .socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000, add_socket_counterbores
+from .socket_weld_elbow import (
+    ASME_B1611_ELBOW45_CLASS3000,
+    ASME_B1611_ELBOW90_CLASS3000,
+    make_socket_weld_elbow_45 as make_socket_weld_elbow_45_shape,
+    make_socket_weld_elbow_90 as make_socket_weld_elbow_90_shape,
+)
 
 # Import dimension data and shape creation function
 from .weld_neck_flange import ASME_B165_CLASS300_WN, make_weld_neck_flange_class300
@@ -760,66 +765,12 @@ def make_socket_weld_elbow(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG
     # Dimensions (already in mm in our data)
     A = dims.center_to_end
     B = (dims.socket_bore_max + dims.socket_bore_min) / 2.0
-    C = dims.socket_wall_thickness
-    D = dims.min_bore
-    G = dims.body_wall_thickness
     J = dims.socket_depth
 
-    r_bore = D / 2.0
-    r_outer = r_bore + G
     r_socket_inner = B / 2.0
-    r_socket_outer = r_socket_inner + C
 
-    # Build elbow geometry
-    # Two cylinders + sphere at origin
-
-    # Leg 1: from (A+J, 0, 0) to origin along -X (inlet at +X end)
-    leg1_outer = cq.Solid.makeCylinder(
-        r_outer, A,
-        cq.Vector(A, 0, 0),
-        cq.Vector(-1, 0, 0)
-    )
-    leg2_outer = cq.Solid.makeCylinder(
-        r_outer, A,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 1, 0)
-    )
-    sphere_outer = cq.Solid.makeSphere(
-        r_outer,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 0, 1),
-        angleDegrees1=-90,
-        angleDegrees2=90,
-        angleDegrees3=360
-    )
-
-    outer = leg1_outer.fuse(leg2_outer).fuse(sphere_outer)
-
-    # Inner bore
-    leg1_inner = cq.Solid.makeCylinder(
-        r_bore, A,
-        cq.Vector(A, 0, 0),
-        cq.Vector(-1, 0, 0)
-    )
-    leg2_inner = cq.Solid.makeCylinder(
-        r_bore, A,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 1, 0)
-    )
-    sphere_inner = cq.Solid.makeSphere(
-        r_bore,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 0, 1),
-        angleDegrees1=-90,
-        angleDegrees2=90,
-        angleDegrees3=360
-    )
-
-    inner = leg1_inner.fuse(leg2_inner).fuse(sphere_inner)
-    elbow = outer.cut(inner)
-
-    # Add socket counterbores
-    elbow = add_socket_counterbores(elbow, r_socket_outer, r_socket_inner, J)
+    # Get elbow shape from socket_weld_elbow module
+    elbow = make_socket_weld_elbow_90_shape(nps)
 
     # Define ports using standard convention:
     # - Port origin: at the mating point (socket bottom + typical gap allowance)
@@ -910,6 +861,128 @@ def make_socket_weld_elbow(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG
             name=name,
             position=(x_off, socket_opening_y, z_off),
             normal=(nx, 0.0, nz),
+            attachment_type="weld",
+            port_name="outlet"
+        )
+
+    return Fitting(nps=nps, shape=elbow, ports=ports, attachment_points=attachment_points)
+
+
+def make_socket_weld_elbow_45(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create a socket weld 45° elbow with defined ports.
+
+    Coordinate system:
+    - Elbow center (where the two legs meet) is at origin
+    - Leg 1 extends along +X axis (inlet port at +X end)
+    - Leg 2 extends at 45° toward +Y (outlet port)
+
+    Ports:
+    - "inlet": Socket end on +X axis, pipe enters from +X direction
+    - "outlet": Socket end at 45°, pipe exits at 45° from inlet
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    """
+    dims = ASME_B1611_ELBOW45_CLASS3000.get(nps)
+    if dims is None:
+        raise ValueError(f"No 45° elbow dimensions for NPS {nps}")
+
+    # Dimensions (already in mm in our data)
+    A = dims.center_to_end
+    B = (dims.socket_bore_max + dims.socket_bore_min) / 2.0
+    J = dims.socket_depth
+
+    r_socket_inner = B / 2.0
+
+    # Get elbow shape from socket_weld_elbow module
+    elbow = make_socket_weld_elbow_45_shape(nps)
+
+    # Direction for 45° leg (45° turn from -X toward +Y)
+    # Outlet direction: rotate -X by 45° counterclockwise = 135° from +X
+    angle_rad = math.radians(135)
+    dir_x = math.cos(angle_rad)  # ~-0.707
+    dir_y = math.sin(angle_rad)  # ~0.707
+
+    # Outlet port position (at end of leg 2)
+    outlet_x = A * dir_x
+    outlet_y = A * dir_y
+
+    # Define ports
+    ports = {}
+
+    # Inlet port: at socket bottom of leg 1
+    # Z-axis points +X (outward, toward where incoming pipe body extends)
+    # X-axis points +Z (up, for rotational reference)
+    inlet_transform = translation_matrix(A, 0, 0) @ rotation_matrix_y(90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Outlet port: at socket bottom of leg 2 (at 45° position)
+    # Z-axis points in outlet direction (outward)
+    # Need rotation that aligns Z with (dir_x, dir_y, 0)
+    # Rotate around Z by 135° from +X, then rotate around Y by 90° to point Z outward
+    outlet_transform = (
+        translation_matrix(outlet_x, outlet_y, 0)
+        @ rotation_matrix_z(135)
+        @ rotation_matrix_y(90)
+    )
+    ports["outlet"] = Port("outlet", outlet_transform)
+
+    # ==========================================================================
+    # WELD ATTACHMENT POINTS
+    # ==========================================================================
+    attachment_points = {}
+
+    # Socket opening positions (where fillet weld goes)
+    socket_opening_inlet_x = A + J
+    socket_opening_outlet_x = outlet_x + J * dir_x
+    socket_opening_outlet_y = outlet_y + J * dir_y
+
+    # Inlet socket opening is at (A+J, 0, 0) - a circle in the YZ plane
+    inlet_attachment_positions = [
+        # (name suffix, Y offset, Z offset, normal_y, normal_z)
+        ("up",    0.0,             r_socket_inner, 0.0,  1.0),
+        ("down",  0.0,            -r_socket_inner, 0.0, -1.0),
+        ("north", r_socket_inner,  0.0,            1.0,  0.0),
+        ("south",-r_socket_inner,  0.0,           -1.0,  0.0),
+    ]
+
+    for suffix, y_off, z_off, ny, nz in inlet_attachment_positions:
+        name = f"inlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(socket_opening_inlet_x, y_off, z_off),
+            normal=(0.0, ny, nz),
+            attachment_type="weld",
+            port_name="inlet"
+        )
+
+    # Outlet socket opening - perpendicular to outlet direction
+    # The outlet direction is (dir_x, dir_y, 0), so perpendicular directions are:
+    # - Up/down: (0, 0, ±1)
+    # - Sideways in XY plane: (-dir_y, dir_x, 0) and (dir_y, -dir_x, 0)
+    perp_x = -dir_y  # perpendicular in XY plane
+    perp_y = dir_x
+
+    outlet_attachment_positions = [
+        # (name suffix, local offset perpendicular to outlet dir, normal direction)
+        ("up",    (0.0, 0.0, r_socket_inner), (0.0, 0.0, 1.0)),
+        ("down",  (0.0, 0.0, -r_socket_inner), (0.0, 0.0, -1.0)),
+        ("left",  (perp_x * r_socket_inner, perp_y * r_socket_inner, 0.0),
+                  (perp_x, perp_y, 0.0)),
+        ("right", (-perp_x * r_socket_inner, -perp_y * r_socket_inner, 0.0),
+                  (-perp_x, -perp_y, 0.0)),
+    ]
+
+    for suffix, offset, normal in outlet_attachment_positions:
+        name = f"outlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(
+                socket_opening_outlet_x + offset[0],
+                socket_opening_outlet_y + offset[1],
+                offset[2]
+            ),
+            normal=normal,
             attachment_type="weld",
             port_name="outlet"
         )
