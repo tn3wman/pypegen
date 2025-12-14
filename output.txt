@@ -1,0 +1,297 @@
+Analyzing 16 Python files...
+2 repetitions of complexity 109
+
+Line 1342 - ./src/pypegen/drawing_generator/bom.py:
+if abs(x_0) > 1e-06:
+    x_1 = (x_2 - x_3) / x_0
+    if x_0 > 0:
+        x_1 = x_2 + x_0 * x_3
+        if x_4 <= x_1 <= x_5:
+            x_6.append(x_0)
+    x_1 = (x_10 - x_3) / x_0
+    if x_0 > 0:
+        x_1 = x_2 + x_0 * x_3
+        if x_4 <= x_1 <= x_5:
+            x_6.append(x_0)
+
+Line 1356 - ./src/pypegen/drawing_generator/bom.py:
+if abs(x_0) > 1e-06:
+    x_1 = (x_2 - x_3) / x_0
+    if x_0 > 0:
+        x_1 = x_2 + x_0 * x_3
+        if x_4 <= x_1 <= x_5:
+            x_6.append(x_0)
+    x_1 = (x_10 - x_3) / x_0
+    if x_0 > 0:
+        x_1 = x_2 + x_0 * x_3
+        if x_4 <= x_1 <= x_5:
+            x_6.append(x_0)
+
+======================================================================
+
+2 repetitions of complexity 48
+
+Line 63 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_3.x, x_3.y, x_3.z), x_0.Vector(x_4.x, x_4.y, x_4.z))
+
+Line 68 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_3.x, x_3.y, x_3.z), x_0.Vector(x_4.x, x_4.y, x_4.z))
+
+======================================================================
+
+2 repetitions of complexity 47
+
+Line 355 - ./src/pypegen/drawing_generator/drawing.py:
+for x_0, x_1 in x_2:
+    x_3 = x_0 * x_4 + x_1 * x_5
+    if x_3 > x_6:
+        x_6 = x_3
+        x_7 = (x_0, x_1)
+
+Line 1228 - ./src/pypegen/drawing_generator/bom.py:
+for x_0, x_1 in x_2:
+    x_3 = x_0 * x_4 + x_1 * x_5
+    if x_3 > x_6:
+        x_6 = x_3
+        x_7 = (x_0, x_1)
+
+======================================================================
+
+2 repetitions of complexity 45
+
+Line 63 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_3.x, x_3.y, x_3.z), x_0.Vector(x_4.x, x_4.y, x_4.z))
+
+Line 68 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_3.x, x_3.y, x_3.z), x_0.Vector(x_4.x, x_4.y, x_4.z))
+
+======================================================================
+
+2 repetitions of complexity 44
+
+Line 859 - ./src/pypegen/drawing_generator/bom.py:
+if x_0 != 0:
+    x_1 = (x_2 - x_3) / x_0
+    x_4 = (x_5 - x_3) / x_0
+    x_6.extend([x_1, x_4])
+
+Line 864 - ./src/pypegen/drawing_generator/bom.py:
+if x_0 != 0:
+    x_1 = (x_2 - x_3) / x_0
+    x_4 = (x_5 - x_3) / x_0
+    x_6.extend([x_1, x_4])
+
+======================================================================
+
+2 repetitions of complexity 43
+
+Line 176 - ./src/pypegen/drawing_generator/drawing.py:
+x_0 = x_0[0][0] * x_1 + x_0[0][1] * x_2 + x_0[0][2] * x_3
+
+Line 500 - ./src/pypegen/drawing_generator/bom.py:
+x_0 = x_0[0][0] * x_1 + x_0[0][1] * x_2 + x_0[0][2] * x_3
+
+======================================================================
+
+2 repetitions of complexity 43
+
+Line 177 - ./src/pypegen/drawing_generator/drawing.py:
+x_0 = x_0[1][0] * x_1 + x_0[1][1] * x_2 + x_0[1][2] * x_3
+
+Line 503 - ./src/pypegen/drawing_generator/bom.py:
+x_0 = x_0[1][0] * x_1 + x_0[1][1] * x_2 + x_0[1][2] * x_3
+
+======================================================================
+
+2 repetitions of complexity 41
+
+Line 187 - ./src/pypegen/drawing_generator/bom.py:
+((x_0.xmin + x_0.xmax) / 2, (x_0.ymin + x_0.ymax) / 2, (x_0.zmin + x_0.zmax) / 2)
+
+Line 197 - ./src/pypegen/drawing_generator/bom.py:
+((x_0.xmin + x_0.xmax) / 2, (x_0.ymin + x_0.ymax) / 2, (x_0.zmin + x_0.zmax) / 2)
+
+======================================================================
+
+2 repetitions of complexity 40
+
+Line 176 - ./src/pypegen/drawing_generator/drawing.py:
+x_0[0][0] * x_1 + x_0[0][1] * x_2 + x_0[0][2] * x_3
+
+Line 500 - ./src/pypegen/drawing_generator/bom.py:
+x_0[0][0] * x_1 + x_0[0][1] * x_2 + x_0[0][2] * x_3
+
+======================================================================
+
+2 repetitions of complexity 40
+
+Line 177 - ./src/pypegen/drawing_generator/drawing.py:
+x_0[1][0] * x_1 + x_0[1][1] * x_2 + x_0[1][2] * x_3
+
+Line 503 - ./src/pypegen/drawing_generator/bom.py:
+x_0[1][0] * x_1 + x_0[1][1] * x_2 + x_0[1][2] * x_3
+
+======================================================================
+
+2 repetitions of complexity 39
+
+Line 0 - ./src/pypegen/drawing_generator/bom.py:
+self, bounds: tuple[float, float, float, float], center: tuple[float, float], direction: tuple[float, float]
+
+Line 0 - ./src/pypegen/drawing_generator/bom.py:
+self, bounds: tuple[float, float, float, float], center: tuple[float, float], direction: tuple[float, float]
+
+======================================================================
+
+4 repetitions of complexity 37
+
+Line 1345 - ./src/pypegen/drawing_generator/bom.py:
+if x_0 > 0:
+    x_1 = x_2 + x_0 * x_3
+    if x_4 <= x_1 <= x_5:
+        x_6.append(x_0)
+
+Line 1351 - ./src/pypegen/drawing_generator/bom.py:
+if x_0 > 0:
+    x_1 = x_2 + x_0 * x_3
+    if x_4 <= x_1 <= x_5:
+        x_6.append(x_0)
+
+Line 1359 - ./src/pypegen/drawing_generator/bom.py:
+if x_0 > 0:
+    x_1 = x_2 + x_0 * x_3
+    if x_4 <= x_1 <= x_5:
+        x_6.append(x_0)
+
+Line 1365 - ./src/pypegen/drawing_generator/bom.py:
+if x_0 > 0:
+    x_1 = x_2 + x_0 * x_3
+    if x_4 <= x_1 <= x_5:
+        x_6.append(x_0)
+
+======================================================================
+
+4 repetitions of complexity 36
+
+Line 268 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+Line 290 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+Line 545 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+Line 567 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+======================================================================
+
+2 repetitions of complexity 34
+
+Line 175 - ./src/pypegen/pipe_generator.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, pnt=x_0.Vector(*x_3), dir=x_0.Vector(*x_4))
+
+Line 177 - ./src/pypegen/pipe_generator.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, pnt=x_0.Vector(*x_3), dir=x_0.Vector(*x_4))
+
+======================================================================
+
+4 repetitions of complexity 33
+
+Line 256 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+Line 280 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+Line 535 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+Line 557 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+======================================================================
+
+4 repetitions of complexity 33
+
+Line 268 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+Line 290 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+Line 545 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+Line 567 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0.Solid.makeSphere(x_1, x_0.Vector(0, 0, 0), x_0.Vector(0, 0, 1), angleDegrees1=-90, angleDegrees2=90, angleDegrees3=360)
+
+======================================================================
+
+2 repetitions of complexity 32
+
+Line 201 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_1.sqrt(x_2[0, 0] ** 2 + x_2[1, 0] ** 2)
+
+Line 229 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_1.sqrt(x_2[0, 0] ** 2 + x_2[1, 0] ** 2)
+
+======================================================================
+
+2 repetitions of complexity 31
+
+Line 175 - ./src/pypegen/pipe_generator.py:
+x_0.Solid.makeCylinder(x_1, x_2, pnt=x_0.Vector(*x_3), dir=x_0.Vector(*x_4))
+
+Line 177 - ./src/pypegen/pipe_generator.py:
+x_0.Solid.makeCylinder(x_1, x_2, pnt=x_0.Vector(*x_3), dir=x_0.Vector(*x_4))
+
+======================================================================
+
+4 repetitions of complexity 30
+
+Line 256 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+Line 280 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+Line 535 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+Line 557 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0.Solid.makeCylinder(x_1, x_2, x_0.Vector(x_2, 0, 0), x_0.Vector(-1, 0, 0))
+
+======================================================================
+
+4 repetitions of complexity 30
+
+Line 262 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 1, 0))
+
+Line 285 - ./src/pypegen/fittings/socket_weld_elbow.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 1, 0))
+
+Line 540 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 1, 0))
+
+Line 562 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 1, 0))
+
+======================================================================
+
+3 repetitions of complexity 30
+
+Line 655 - ./src/pypegen/pipe_generator.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 0, 1))
+
+Line 728 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 0, 1))
+
+Line 729 - ./src/pypegen/fittings/pipe_fittings.py:
+x_0 = x_1.Solid.makeCylinder(x_2, x_3, x_1.Vector(0, 0, 0), x_1.Vector(0, 0, 1))
+
+======================================================================
+
+Found 21 repeated patterns

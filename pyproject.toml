@@ -1,0 +1,89 @@
+[project]
+name = "pypegen"
+version = "0.0.1"
+description = "A Python package for generating piping drawings and models."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11, <3.14"
+authors = [
+    { name = "tn3wman" },
+]
+keywords = ["piping", "fabrication", "engineering", "cad", "drawings", "models"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "cadquery>=2.6.1",
+    "cairosvg>=2.8.2",
+    "reportlab>=4.4.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/tn3wman/pypegen"
+Repository = "https://github.com/tn3wman/pypegen"
+"Bug Tracker" = "https://github.com/tn3wman/pypegen/issues"
+Documentation = "https://github.com/tn3wman/pypegen#readme"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.1",
+    "ruff>=0.1.0",
+]
+
+[tool.poetry]
+packages = [
+    { include = "pypegen", from = "src" },
+]
+
+[tool.ruff]
+line-length = 200
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings  
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+]
+ignore = [
+    "E501",   # line too long (handled by line-length)
+    "B018",   # no-else-return
+    "W293",   # blank line contains whitespace
+    "F403",   # star imports used in __init__.py files for auto-generated modules
+    "F405",   # names may be undefined from star imports (acceptable for auto-generated modules)
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "-s",  # Don't capture output, show print statements
+]
+filterwarnings = [
+    # Ignore SWIG-related deprecation warnings from OCP/CadQuery bindings
+    "ignore:builtin type Swig.*has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

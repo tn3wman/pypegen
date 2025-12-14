@@ -1,0 +1,30 @@
+# Prompt for Claude
+
+route = PipeRoute()
+route.size = "2 inch"
+route.pipe_schedule = "40"
+route.socket_class = "3000"
+route.flange_class = "300"
+route.material = "316 Stainless Steel"
+
+route.add_flange("up")
+route.add_straight("10 ft")
+route.add_elbow("bw", "east", 90)
+route.add_straight("5 ft")
+route.add_elbow("sw", "down", 90)
+route.add_straight("8 ft")
+route.add_flange("up")
+route.add_flange("down")
+route.add_straight("4 ft")
+route.add_tee("bw", "north", "east")
+
+I also need a way to build the route from a branch for example if I wanted to add a branch on the main route 6" along the first straight section or if I add a tee I need to be able to build from each branch of the tee. I would like type hinting as well but maybe that is not possible. Maybe it has to be something like this.
+
+route.add_straight("6 ft", branch="north")
+route.add_straight("up", branch="east")
+
+But now what happends if I want to add another tee on the either of the branches? Now I have nested branches? Seems like I may need to have some kind of branch object or named branches or something. I wish IDE's had dynamic type hinting or something based on previous code and the current state of the object.
+
+route.build()
+
+I am open to more proper suggestions on how to properly build the route with proper pythonic code and branch handling. How does something like react flow handle this? Please thoroughly research the best path forward.
