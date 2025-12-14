@@ -28,9 +28,24 @@ For each connection point on the fitting:
 1. Go to **3D Model** tab → **Work Features** panel → **User Coordinate System**
 2. Position the UCS origin at the **center of the port opening** (where a pipe would connect)
 3. Orient the axes:
-   - **Z-axis** should point **outward** from the fitting (toward where the connecting pipe extends)
-   - **X-axis** typically points "up" (world +Z) for rotational reference
+   - **Z-axis** (blue): Points **outward** from the fitting, toward where the connecting pipe extends. This is the most important axis.
+   - **X-axis** (red): Points **"up"** (typically world +Z direction). This defines the rotational alignment when fittings mate.
+   - **Y-axis** (green): Completes the right-hand coordinate system (automatically determined by X and Z).
 4. Click to place the UCS
+
+```
+Example: Horizontal port on a valve body
+
+        Z (blue) → points outward toward pipe
+        ↑
+        │
+        ●───→ X (red) points up (world +Z)
+       ╱
+      ↓
+     Y (green) computed automatically
+```
+
+**Tip:** If you're unsure about X-axis orientation, just make sure Z points outward correctly. pypegen can compute a reasonable X-axis automatically if needed.
 
 ### Step 3: Rename the Coordinate Systems
 
