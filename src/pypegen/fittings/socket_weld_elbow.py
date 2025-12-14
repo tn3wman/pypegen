@@ -434,10 +434,9 @@ def make_socket_weld_elbow_45(
 
     The elbow is oriented with:
     - Inlet from +X direction toward origin
-    - Outlet from origin toward +Y direction (45° turn)
-    - A sphere at origin connects the two legs
-
-    Same construction as 90° elbow but with 45° turn angle.
+    - Outlet from origin toward 135° direction (45° turn)
+    - A 90° sphere wedge at origin fills the gap between legs
+    - 45° chamfer transitions from body to socket
 
     Args:
         nps: Nominal pipe size (e.g., "1/2", "2", "4")
@@ -454,7 +453,7 @@ def make_socket_weld_elbow_45(
         raise ValueError(f"No ASME B16.11 Class {pressure_class} 45° elbow dimensions for NPS {nps}")
 
     # Get dimensions from ASME B16.11
-    A = dims.center_to_end  # Center to end of socket
+    A = dims.center_to_end  # Center to bottom of socket
     B = (dims.socket_bore_max + dims.socket_bore_min) / 2.0  # Socket bore diameter
     C = dims.socket_wall_thickness  # Socket wall thickness
     D = dims.min_bore  # Flow bore diameter
@@ -467,6 +466,9 @@ def make_socket_weld_elbow_45(
     r_socket_inner = B / 2.0  # Socket bore radius (accepts pipe OD)
     r_socket_outer = r_socket_inner + C  # Outer radius of socket
 
+    # 45° chamfer length (equal to radial change for 45° angle)
+    chamfer_length = r_socket_outer - r_outer
+
     # Direction for outlet leg (45° turn from inlet)
     # Inlet is along -X (from +X toward origin)
     # 45° turn toward +Y means outlet direction is at 135° from +X
@@ -474,32 +476,74 @@ def make_socket_weld_elbow_45(
     dir_x = math.cos(angle_rad)  # ~-0.707
     dir_y = math.sin(angle_rad)  # ~0.707
 
-    # Outer body: two cylinders + full sphere at origin
-    # Leg 1: from (A, 0, 0) to origin along -X
+    # === OUTER SHAPES ===
+
+    # Body cylinders
     leg1_outer = cq.Solid.makeCylinder(
         r_outer, A,
         cq.Vector(A, 0, 0),
         cq.Vector(-1, 0, 0)
     )
-    # Leg 2: from origin toward outlet direction
     leg2_outer = cq.Solid.makeCylinder(
         r_outer, A,
         cq.Vector(0, 0, 0),
         cq.Vector(dir_x, dir_y, 0)
     )
-    # Full sphere at origin
+
+    # 90° sphere wedge at 180° to fill gap between legs
     sphere_outer = cq.Solid.makeSphere(
         r_outer,
         cq.Vector(0, 0, 0),
         cq.Vector(0, 0, 1),
         angleDegrees1=-90,
         angleDegrees2=90,
-        angleDegrees3=360
+        angleDegrees3=90
+    )
+    sphere_outer = sphere_outer.moved(
+        cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 180)
     )
 
-    outer = leg1_outer.fuse(leg2_outer).fuse(sphere_outer)
+    # Chamfer cones (45° transition from body to socket)
+    chamfer1_outer = cq.Solid.makeCone(
+        r_outer, r_socket_outer, chamfer_length,
+        cq.Vector(A, 0, 0),
+        cq.Vector(1, 0, 0)
+    )
+    outlet_pos = (A * dir_x, A * dir_y, 0)
+    chamfer2_outer = cq.Solid.makeCone(
+        r_outer, r_socket_outer, chamfer_length,
+        cq.Vector(*outlet_pos),
+        cq.Vector(dir_x, dir_y, 0)
+    )
 
-    # Inner bore: same shape with r_bore
+    # Socket cylinders (start after chamfer)
+    sock1_outer = cq.Solid.makeCylinder(
+        r_socket_outer, J - chamfer_length,
+        cq.Vector(A + chamfer_length, 0, 0),
+        cq.Vector(1, 0, 0)
+    )
+    outlet_sock_start = (
+        outlet_pos[0] + chamfer_length * dir_x,
+        outlet_pos[1] + chamfer_length * dir_y,
+        0
+    )
+    sock2_outer = cq.Solid.makeCylinder(
+        r_socket_outer, J - chamfer_length,
+        cq.Vector(*outlet_sock_start),
+        cq.Vector(dir_x, dir_y, 0)
+    )
+
+    # Combine outer shapes
+    outer = (
+        leg1_outer.fuse(leg2_outer)
+        .fuse(sphere_outer)
+        .fuse(chamfer1_outer).fuse(chamfer2_outer)
+        .fuse(sock1_outer).fuse(sock2_outer)
+    )
+
+    # === INNER SHAPES ===
+
+    # Inner bore cylinders
     leg1_inner = cq.Solid.makeCylinder(
         r_bore, A,
         cq.Vector(A, 0, 0),
@@ -510,22 +554,41 @@ def make_socket_weld_elbow_45(
         cq.Vector(0, 0, 0),
         cq.Vector(dir_x, dir_y, 0)
     )
+
+    # Inner sphere wedge
     sphere_inner = cq.Solid.makeSphere(
         r_bore,
         cq.Vector(0, 0, 0),
         cq.Vector(0, 0, 1),
         angleDegrees1=-90,
         angleDegrees2=90,
-        angleDegrees3=360
+        angleDegrees3=90
+    )
+    sphere_inner = sphere_inner.moved(
+        cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 180)
     )
 
-    inner = leg1_inner.fuse(leg2_inner).fuse(sphere_inner)
+    # Socket bore cylinders
+    sock1_inner = cq.Solid.makeCylinder(
+        r_socket_inner, J,
+        cq.Vector(A, 0, 0),
+        cq.Vector(1, 0, 0)
+    )
+    sock2_inner = cq.Solid.makeCylinder(
+        r_socket_inner, J,
+        cq.Vector(*outlet_pos),
+        cq.Vector(dir_x, dir_y, 0)
+    )
+
+    # Combine inner shapes
+    inner = (
+        leg1_inner.fuse(leg2_inner)
+        .fuse(sphere_inner)
+        .fuse(sock1_inner).fuse(sock2_inner)
+    )
 
     # Cut inner from outer to create hollow elbow
     elbow = outer.cut(inner)
-
-    # Add socket counterbores to end faces
-    elbow = add_socket_counterbores(elbow, r_socket_outer, r_socket_inner, J)
 
     return elbow
 
