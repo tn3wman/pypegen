@@ -24,6 +24,10 @@ from .fittings.pipe_fittings import (
     Fitting,
     Port,
     apply_transform_to_shape,
+    compute_initial_up_vector,
+    compute_up_vector_after_elbow,
+    compute_up_vector_for_branch,
+    create_port_markers_for_fitting,
     get_position,
     identity_matrix,
     make_pipe,
@@ -160,6 +164,23 @@ class RouteGeometryBuilder:
         self._item_counter = 0
         self._weld_counter = 0
 
+    def _add_fitting_with_markers(
+        self, fitting: Fitting, world_transform: np.ndarray
+    ) -> None:
+        """
+        Add a fitting to the route and optionally add coordinate frame markers.
+
+        Args:
+            fitting: The fitting object with ports
+            world_transform: World transform matrix for the fitting
+        """
+        self.route.fittings.append((fitting, world_transform))
+
+        # Add coordinate frame markers if enabled
+        if self.route.show_coordinate_frames:
+            markers = create_port_markers_for_fitting(fitting, world_transform)
+            self.route.parts.extend(markers)
+
     def build(self) -> None:
         """Build geometry for the entire route tree."""
         if self.route.root is None:
@@ -174,11 +195,15 @@ class RouteGeometryBuilder:
         else:
             initial_direction = (1.0, 0.0, 0.0)  # Default: east
 
+        # Compute initial up-vector based on direction
+        initial_up = compute_initial_up_vector(initial_direction)
+
         # Recursive build starting from root
         self._build_node(
             node=self.route.root,
             incoming_transform=initial_transform,
             incoming_direction=initial_direction,
+            up_vector=initial_up,
         )
 
     def _build_node(
@@ -186,7 +211,8 @@ class RouteGeometryBuilder:
         node: RouteNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """
         Build geometry for a single node and recursively build children.
 
@@ -194,27 +220,28 @@ class RouteGeometryBuilder:
             node: The RouteNode to build
             incoming_transform: World transform for the inlet port
             incoming_direction: World direction the pipe was traveling
+            up_vector: Current "up" reference direction (perpendicular to pipe)
 
         Returns:
-            Dictionary mapping port names to (transform, direction) tuples
+            Dictionary mapping port names to (transform, direction, up_vector) tuples
             for each outlet port.
         """
         if isinstance(node, FlangeNode):
-            return self._build_flange(node, incoming_transform)
+            return self._build_flange(node, incoming_transform, up_vector)
         elif isinstance(node, PipeSegmentNode):
-            return self._build_pipe(node, incoming_transform, incoming_direction)
+            return self._build_pipe(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, ElbowNode):
-            return self._build_elbow(node, incoming_transform, incoming_direction)
+            return self._build_elbow(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, TeeNode):
-            return self._build_tee(node, incoming_transform, incoming_direction)
+            return self._build_tee(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, CrossNode):
-            return self._build_cross(node, incoming_transform, incoming_direction)
+            return self._build_cross(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, WeldoletNode):
-            return self._build_weldolet(node, incoming_transform, incoming_direction)
+            return self._build_weldolet(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, ReducerNode):
-            return self._build_reducer(node, incoming_transform, incoming_direction)
+            return self._build_reducer(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, TerminalNode):
-            return self._build_terminal(node, incoming_transform, incoming_direction)
+            return self._build_terminal(node, incoming_transform, incoming_direction, up_vector)
         else:
             raise ValueError(f"Unknown node type: {type(node)}")
 
@@ -226,8 +253,10 @@ class RouteGeometryBuilder:
         self,
         node: FlangeNode,
         incoming_transform: np.ndarray,
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a flange fitting."""
+        _ = up_vector  # Initial up computed based on direction
         direction = direction_name_to_vector(node.direction)
 
         # Create flange
@@ -256,8 +285,8 @@ class RouteGeometryBuilder:
             connected_directions=[node.direction],
         )
 
-        # Track fitting
-        self.route.fittings.append((fitting, flange_transform))
+        # Track fitting and add coordinate frame markers if enabled
+        self._add_fitting_with_markers(fitting, flange_transform)
 
         # Track weld at hub
         self._add_weld(
@@ -278,13 +307,16 @@ class RouteGeometryBuilder:
         weld_port = fitting.get_port("weld")
         outlet_transform = flange_transform @ weld_port.transform
 
-        outlets = {"weld": (outlet_transform, direction)}
+        # Compute up-vector for this direction
+        outlet_up = compute_initial_up_vector(direction)
+
+        outlets = {"weld": (outlet_transform, direction, outlet_up)}
 
         # Recursively build children
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -293,7 +325,8 @@ class RouteGeometryBuilder:
         node: PipeSegmentNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a pipe segment."""
         # Parse length
         length_mm = parse_distance(node.length)
@@ -331,17 +364,18 @@ class RouteGeometryBuilder:
         end_port = fitting.get_port("end")
         outlet_transform = pipe_transform @ end_port.transform
 
-        outlets = {"end": (outlet_transform, incoming_direction)}
+        # Pipe doesn't change up-vector (no rotation around centerline)
+        outlets = {"end": (outlet_transform, incoming_direction, up_vector)}
 
         # Handle weldolets on this pipe
         for weldolet in node.weldolets:
-            self._build_weldolet_on_pipe(weldolet, node, pipe_transform, incoming_direction)
+            self._build_weldolet_on_pipe(weldolet, node, pipe_transform, incoming_direction, up_vector)
 
         # Recursively build children
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -350,15 +384,18 @@ class RouteGeometryBuilder:
         node: ElbowNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build an elbow fitting."""
         turn_direction = direction_name_to_vector(node.turn_direction)
 
         # Create elbow
         fitting = make_socket_weld_elbow(self.nps, units="mm")
 
-        # Compute elbow rotation
-        elbow_transform = self._compute_elbow_transform(fitting, incoming_transform, incoming_direction, turn_direction)
+        # Compute elbow rotation with up-vector awareness
+        elbow_transform = self._compute_elbow_transform(
+            fitting, incoming_transform, incoming_direction, turn_direction, up_vector
+        )
 
         # Add geometry
         if fitting.shape is not None:
@@ -378,8 +415,8 @@ class RouteGeometryBuilder:
             ],
         )
 
-        # Track fitting
-        self.route.fittings.append((fitting, elbow_transform))
+        # Track fitting and add coordinate frame markers if enabled
+        self._add_fitting_with_markers(fitting, elbow_transform)
 
         # Track welds
         self._add_weld(
@@ -400,13 +437,16 @@ class RouteGeometryBuilder:
         outlet_port = fitting.get_port("outlet")
         outlet_transform = elbow_transform @ outlet_port.transform
 
-        outlets = {"outlet": (outlet_transform, turn_direction)}
+        # Compute new up-vector after the elbow turn
+        outlet_up = compute_up_vector_after_elbow(incoming_direction, turn_direction, up_vector)
+
+        outlets = {"outlet": (outlet_transform, turn_direction, outlet_up)}
 
         # Recursively build children
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -415,7 +455,8 @@ class RouteGeometryBuilder:
         node: TeeNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a tee fitting."""
         branch_direction = direction_name_to_vector(node.branch_direction)
 
@@ -425,8 +466,10 @@ class RouteGeometryBuilder:
         # Create a Fitting object for the tee
         fitting = self._create_tee_fitting(self.nps, tee_shape)
 
-        # Compute tee transform
-        tee_transform = self._compute_tee_transform(fitting, incoming_transform, incoming_direction, branch_direction)
+        # Compute tee transform with up-vector awareness
+        tee_transform = self._compute_tee_transform(
+            fitting, incoming_transform, incoming_direction, branch_direction, up_vector
+        )
 
         # Add geometry
         shape = apply_transform_to_shape(tee_shape, tee_transform)
@@ -446,8 +489,8 @@ class RouteGeometryBuilder:
             ],
         )
 
-        # Track fitting
-        self.route.fittings.append((fitting, tee_transform))
+        # Track fitting and add coordinate frame markers if enabled
+        self._add_fitting_with_markers(fitting, tee_transform)
 
         # Store transform on node
         node._world_transform = tee_transform
@@ -461,16 +504,22 @@ class RouteGeometryBuilder:
         run_outlet_transform = tee_transform @ run_port.transform
         branch_outlet_transform = tee_transform @ branch_port.transform
 
+        # Compute up-vectors for each outlet
+        # Run continues in same direction, up-vector unchanged
+        run_up = up_vector
+        # Branch goes in a different direction, compute new up-vector
+        branch_up = compute_up_vector_for_branch(incoming_direction, branch_direction, up_vector)
+
         outlets = {
-            "run": (run_outlet_transform, incoming_direction),
-            "branch": (branch_outlet_transform, branch_direction),
+            "run": (run_outlet_transform, incoming_direction, run_up),
+            "branch": (branch_outlet_transform, branch_direction, branch_up),
         }
 
         # Recursively build children
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -479,7 +528,8 @@ class RouteGeometryBuilder:
         node: CrossNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a cross fitting."""
         orientation = direction_name_to_vector(node.orientation)
 
@@ -492,8 +542,10 @@ class RouteGeometryBuilder:
         # Compute perpendicular directions for branches
         left_dir, right_dir = compute_perpendicular_directions(incoming_direction, orientation)
 
-        # Compute cross transform
-        cross_transform = self._compute_cross_transform(fitting, incoming_transform, incoming_direction, left_dir)
+        # Compute cross transform with up-vector awareness
+        cross_transform = self._compute_cross_transform(
+            fitting, incoming_transform, incoming_direction, left_dir, up_vector
+        )
 
         # Add geometry
         shape = apply_transform_to_shape(cross_shape, cross_transform)
@@ -514,8 +566,8 @@ class RouteGeometryBuilder:
             ],
         )
 
-        # Track fitting
-        self.route.fittings.append((fitting, cross_transform))
+        # Track fitting and add coordinate frame markers if enabled
+        self._add_fitting_with_markers(fitting, cross_transform)
 
         # Store transform on node
         node._world_transform = cross_transform
@@ -527,17 +579,22 @@ class RouteGeometryBuilder:
         left_port = fitting.get_port("branch_left")
         right_port = fitting.get_port("branch_right")
 
+        # Compute up-vectors for each outlet
+        run_up = up_vector  # Run continues same
+        left_up = compute_up_vector_for_branch(incoming_direction, left_dir, up_vector)
+        right_up = compute_up_vector_for_branch(incoming_direction, right_dir, up_vector)
+
         outlets = {
-            "run": (cross_transform @ run_port.transform, incoming_direction),
-            "branch_left": (cross_transform @ left_port.transform, left_dir),
-            "branch_right": (cross_transform @ right_port.transform, right_dir),
+            "run": (cross_transform @ run_port.transform, incoming_direction, run_up),
+            "branch_left": (cross_transform @ left_port.transform, left_dir, left_up),
+            "branch_right": (cross_transform @ right_port.transform, right_dir, right_up),
         }
 
         # Recursively build children
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -546,19 +603,23 @@ class RouteGeometryBuilder:
         node: WeldoletNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a standalone weldolet (not attached to a pipe segment)."""
         # This is typically called when a weldolet is not attached to a pipe
         # In practice, weldolets should be in the pipe's weldolets list
         branch_direction = direction_name_to_vector(node.branch_direction)
 
-        outlets = {"branch": (incoming_transform, branch_direction)}
+        # Compute up-vector for the branch
+        branch_up = compute_up_vector_for_branch(incoming_direction, branch_direction, up_vector)
+
+        outlets = {"branch": (incoming_transform, branch_direction, branch_up)}
 
         # Recursively build children
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -568,8 +629,10 @@ class RouteGeometryBuilder:
         pipe_node: PipeSegmentNode,
         pipe_transform: np.ndarray,
         pipe_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
     ) -> None:
         """Build a weldolet attached to a pipe segment."""
+        _ = pipe_node  # Unused but kept for API compatibility
         # Get position along pipe
         position_mm = parse_distance(node.position_along_pipe)
 
@@ -606,30 +669,34 @@ class RouteGeometryBuilder:
         node._world_transform = outlet_transform
         node._built = True
 
+        # Compute up-vector for the branch
+        branch_up = compute_up_vector_for_branch(pipe_direction, branch_direction, up_vector)
+
         # Build children from the weldolet branch
-        outlets = {"branch": (outlet_transform, branch_direction)}
+        outlets = {"branch": (outlet_transform, branch_direction, branch_up)}
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
     def _build_reducer(
         self,
         node: ReducerNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a reducer (stub - geometry TBD)."""
         # For now, just pass through
         node._world_transform = incoming_transform
         node._built = True
 
-        outlets = {"outlet": (incoming_transform, incoming_direction)}
+        outlets = {"outlet": (incoming_transform, incoming_direction, up_vector)}
 
         for port_name, child in node.children.items():
             if port_name in outlets:
-                transform, dir_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec)
 
         return outlets
 
@@ -638,8 +705,10 @@ class RouteGeometryBuilder:
         node: TerminalNode,
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
-    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float]]]:
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a terminal node (cap, blind flange, or open end)."""
+        _ = up_vector  # Unused but kept for API consistency
         node._world_transform = incoming_transform
         node._built = True
 
@@ -678,13 +747,15 @@ class RouteGeometryBuilder:
         M = dims.center_to_end_branch
 
         # Create ports for the tee
-        # Inlet: from -X toward center, Z points +X (toward incoming pipe)
+        # Port convention: Z-axis points OUTWARD toward where connecting pipe body extends
+        #
+        # Inlet: at -X side of tee, Z points -X (toward incoming pipe body)
         inlet_transform = translation_matrix(-C, 0, 0) @ rotation_matrix_y(-90)
 
-        # Run: from center toward +X, Z points +X (toward outgoing pipe)
+        # Run: at +X side of tee, Z points +X (toward outgoing pipe body)
         run_transform = translation_matrix(C, 0, 0) @ rotation_matrix_y(90)
 
-        # Branch: from center toward +Y, Z points +Y (toward branch pipe)
+        # Branch: at +Y side of tee, Z points +Y (toward branch pipe body)
         branch_transform = translation_matrix(0, M, 0) @ rotation_matrix_x(-90)
 
         ports = {
@@ -704,16 +775,18 @@ class RouteGeometryBuilder:
         C = dims.center_to_end
 
         # Create ports for the cross
-        # Inlet: from -X toward center
+        # Port convention: Z-axis points OUTWARD toward where connecting pipe body extends
+        #
+        # Inlet: at -X side of cross, Z points -X (toward incoming pipe body)
         inlet_transform = translation_matrix(-C, 0, 0) @ rotation_matrix_y(-90)
 
-        # Run: from center toward +X
+        # Run: at +X side of cross, Z points +X (toward outgoing pipe body)
         run_transform = translation_matrix(C, 0, 0) @ rotation_matrix_y(90)
 
-        # Branch Left: from center toward +Y
+        # Branch Left: at +Y side of cross, Z points +Y (toward left branch pipe body)
         left_transform = translation_matrix(0, C, 0) @ rotation_matrix_x(-90)
 
-        # Branch Right: from center toward -Y
+        # Branch Right: at -Y side of cross, Z points -Y (toward right branch pipe body)
         right_transform = translation_matrix(0, -C, 0) @ rotation_matrix_x(90)
 
         ports = {
@@ -737,16 +810,16 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
     ) -> np.ndarray:
         """Compute transform for a pipe segment."""
-        # The pipe's start port should align with incoming_transform
-        # and face opposite to incoming_direction
+        # Mark unused parameters (kept for API consistency)
+        _, _ = fitting, inlet_port_name
 
         # Pipe is created along Z axis, start at Z=0, end at Z=length
-        # Start port faces -Z, end port faces +Z
-
-        # Rotate pipe so start port faces opposite to incoming direction
-        # (start port should face the fitting we're connecting from)
-        neg_dir = (-incoming_direction[0], -incoming_direction[1], -incoming_direction[2])
-        rotation = rotation_to_align_z_with_direction(neg_dir)
+        # Start port faces -Z (toward previous fitting)
+        # End port faces +Z (toward next fitting)
+        #
+        # incoming_direction is the direction the pipe should EXTEND
+        # So we need +Z to point in incoming_direction
+        rotation = rotation_to_align_z_with_direction(incoming_direction)
 
         # Position at incoming_transform origin
         position = get_position(incoming_transform)
@@ -760,15 +833,52 @@ class RouteGeometryBuilder:
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
         turn_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
     ) -> np.ndarray:
-        """Compute transform for an elbow."""
+        """
+        Compute transform for an elbow with up-vector awareness.
+
+        The elbow's Z-axis (normal to the plane of the elbow) should be
+        consistent with the up-vector when possible.
+        """
+        _ = fitting  # Unused but kept for API consistency
+
         # Elbow default orientation: inlet from +X, outlet toward +Y
-        # Need to rotate so inlet faces incoming pipe and outlet faces turn_direction
+        # The elbow lies in the XY plane, with Z perpendicular to it
 
-        # Import the compute_elbow_rotation function
-        from .pipe_router import compute_elbow_rotation
+        # Compute the elbow's Z-axis as the cross product of inlet and outlet directions
+        inc = np.array(incoming_direction)
+        out = np.array(turn_direction)
+        up = np.array(up_vector)
 
-        elbow_rotation = compute_elbow_rotation(incoming_direction, turn_direction)
+        # The plane of the elbow contains both pipe directions
+        # Z-axis is perpendicular to this plane
+        z_vec = np.cross(inc, out)
+        z_norm = np.linalg.norm(z_vec)
+
+        if z_norm < 1e-6:
+            # Directions are parallel (shouldn't happen for 90° elbow)
+            # Fall back to up-vector as Z
+            z_vec = up
+        else:
+            z_vec = z_vec / z_norm
+            # Ensure Z is in the "up" hemisphere when possible
+            if np.dot(z_vec, up) < 0:
+                z_vec = -z_vec
+
+        # The inlet faces opposite to incoming direction (toward the pipe)
+        inlet_face = (-inc[0], -inc[1], -inc[2])
+        # The outlet faces the turn direction (toward the next pipe)
+        outlet_face = out
+
+        # Build rotation matrix:
+        # X column: inlet direction (where inlet Z points)
+        # Y column: outlet direction (where outlet Z points)
+        # Z column: perpendicular to both (normal to elbow plane)
+        rotation = np.eye(4)
+        rotation[:3, 0] = inlet_face
+        rotation[:3, 1] = outlet_face
+        rotation[:3, 2] = z_vec
 
         # Position elbow so inlet port is at incoming_transform
         dims = self.elbow_dims
@@ -777,18 +887,15 @@ class RouteGeometryBuilder:
 
         A = dims.center_to_end  # Center to socket end
 
-        # Elbow center is A distance back from inlet port along incoming direction
+        # Elbow center is A distance along incoming direction from inlet position
         inlet_pos = get_position(incoming_transform)
-
-        # After rotation, inlet is along the negative of incoming_direction from center
-        # So center = inlet_pos + A * incoming_direction
         center_pos = (
             inlet_pos[0] + A * incoming_direction[0],
             inlet_pos[1] + A * incoming_direction[1],
             inlet_pos[2] + A * incoming_direction[2],
         )
 
-        elbow_transform = translation_matrix(*center_pos) @ elbow_rotation
+        elbow_transform = translation_matrix(*center_pos) @ rotation
 
         return elbow_transform
 
@@ -798,12 +905,18 @@ class RouteGeometryBuilder:
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
         branch_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
     ) -> np.ndarray:
-        """Compute transform for a tee."""
+        """
+        Compute transform for a tee with up-vector awareness.
+
+        The tee's Z-axis (perpendicular to both run and branch) should be
+        consistent with the up-vector to ensure proper orientation.
+        """
+        _ = fitting  # Unused but kept for API consistency
+
         # Tee default: inlet from -X, run to +X, branch to +Y
-        # Need to rotate so:
-        # - Inlet faces opposite to incoming_direction
-        # - Branch faces branch_direction
+        # The tee body lies in the XY plane
 
         dims = self.tee_dims
         if dims is None:
@@ -812,14 +925,24 @@ class RouteGeometryBuilder:
         C = dims.center_to_end_run
 
         # Build rotation matrix
-        # Run direction is same as incoming
+        # Run direction (X) is same as incoming
         run_vec = np.array(incoming_direction)
         branch_vec = np.array(branch_direction)
+        up = np.array(up_vector)
 
-        # Compute the rotation matrix that aligns X with run and Y with branch
-        # Third axis is cross product
+        # Compute Z-axis as cross product of run and branch
         z_vec = np.cross(run_vec, branch_vec)
-        z_vec = z_vec / np.linalg.norm(z_vec)
+        z_norm = np.linalg.norm(z_vec)
+
+        if z_norm < 1e-6:
+            # Run and branch are parallel (shouldn't happen for a proper tee)
+            z_vec = up
+        else:
+            z_vec = z_vec / z_norm
+            # KEY FIX: Ensure Z is in the "up" hemisphere when possible
+            # This prevents the tee from being upside-down
+            if np.dot(z_vec, up) < 0:
+                z_vec = -z_vec
 
         # Build rotation matrix [run | branch | z]
         rotation = np.eye(4)
@@ -845,8 +968,15 @@ class RouteGeometryBuilder:
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
         left_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
     ) -> np.ndarray:
-        """Compute transform for a cross."""
+        """
+        Compute transform for a cross with up-vector awareness.
+
+        Similar to tee but with four ports instead of three.
+        """
+        _ = fitting  # Unused but kept for API consistency
+
         dims = self.cross_dims
         if dims is None:
             raise ValueError(f"No cross dimensions for NPS {self.nps}")
@@ -856,8 +986,18 @@ class RouteGeometryBuilder:
         # Build rotation matrix similar to tee
         run_vec = np.array(incoming_direction)
         left_vec = np.array(left_direction)
+        up = np.array(up_vector)
+
         z_vec = np.cross(run_vec, left_vec)
-        z_vec = z_vec / np.linalg.norm(z_vec)
+        z_norm = np.linalg.norm(z_vec)
+
+        if z_norm < 1e-6:
+            z_vec = up
+        else:
+            z_vec = z_vec / z_norm
+            # Ensure Z is in the "up" hemisphere
+            if np.dot(z_vec, up) < 0:
+                z_vec = -z_vec
 
         rotation = np.eye(4)
         rotation[:3, 0] = run_vec

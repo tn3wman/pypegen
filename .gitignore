@@ -178,3 +178,5 @@ $RECYCLE.BIN/
 
 step/
 drawings/
+output/
+*.step

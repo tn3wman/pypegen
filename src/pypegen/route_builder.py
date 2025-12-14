@@ -100,6 +100,9 @@ class BranchingPipeRoute:
     welds: list[WeldRecord] = field(default_factory=list)
     fittings: list[tuple[Fitting, np.ndarray]] = field(default_factory=list)
 
+    # Debug options
+    show_coordinate_frames: bool = False  # Add coordinate frame markers at ports
+
     # Private state
     _built: bool = field(default=False, repr=False)
 
@@ -565,6 +568,7 @@ class RouteBuilder:
         schedule: str = "40",
         flange_class: int = 300,
         material: str = "316 Stainless Steel",
+        show_coordinate_frames: bool = False,
     ):
         """
         Initialize the route builder.
@@ -574,11 +578,13 @@ class RouteBuilder:
             schedule: Pipe schedule (e.g., "40", "80", "160")
             flange_class: Flange pressure class (e.g., 150, 300, 600)
             material: Material description
+            show_coordinate_frames: If True, add debug coordinate frame markers at ports
         """
         self._nps = nps
         self._schedule = schedule
         self._flange_class = flange_class
         self._material = material
+        self._show_coordinate_frames = show_coordinate_frames
 
         self._root: RouteNode | None = None
         self._current_node: RouteNode | None = None
@@ -638,6 +644,22 @@ class RouteBuilder:
             Self for method chaining
         """
         self._material = material
+        return self
+
+    def set_show_coordinate_frames(self, show: bool = True) -> RouteBuilder:
+        """
+        Enable/disable coordinate frame markers for debugging.
+
+        When enabled, adds X (red), Y (green), Z (blue) arrow markers
+        at each fitting port in the exported STEP file.
+
+        Args:
+            show: Whether to show coordinate frames
+
+        Returns:
+            Self for method chaining
+        """
+        self._show_coordinate_frames = show
         return self
 
     # -------------------------------------------------------------------------
@@ -1017,6 +1039,7 @@ class RouteBuilder:
             flange_class=self._flange_class,
             material=self._material,
             root=self._root,
+            show_coordinate_frames=self._show_coordinate_frames,
         )
 
         # Import and use the geometry builder

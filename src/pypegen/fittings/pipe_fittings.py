@@ -173,6 +173,16 @@ def get_position(T: np.ndarray) -> tuple[float, float, float]:
     return (T[0, 3], T[1, 3], T[2, 3])
 
 
+def get_x_axis(T: np.ndarray) -> tuple[float, float, float]:
+    """Extract X-axis direction from transformation matrix."""
+    return (T[0, 0], T[1, 0], T[2, 0])
+
+
+def get_y_axis(T: np.ndarray) -> tuple[float, float, float]:
+    """Extract Y-axis direction from transformation matrix."""
+    return (T[0, 1], T[1, 1], T[2, 1])
+
+
 def get_z_axis(T: np.ndarray) -> tuple[float, float, float]:
     """Extract Z-axis direction from transformation matrix."""
     return (T[0, 2], T[1, 2], T[2, 2])
@@ -220,35 +230,268 @@ def matrix_to_cadquery_location(T: np.ndarray) -> tuple[cq.Location, tuple[float
 
 
 def apply_transform_to_shape(shape: cq.Shape, T: np.ndarray) -> cq.Shape:
-    """Apply 4x4 transformation matrix to a CadQuery shape."""
-    pos = get_position(T)
-    R = get_rotation_3x3(T)
+    """
+    Apply 4x4 transformation matrix to a CadQuery shape.
 
-    # Calculate Euler angles from rotation matrix
-    sy = math.sqrt(R[0, 0]**2 + R[1, 0]**2)
-    singular = sy < 1e-6
+    Uses CadQuery's native Matrix class for direct matrix application,
+    avoiding Euler angle decomposition issues that can cause incorrect
+    orientations for compound rotations.
 
-    if not singular:
-        rx = math.degrees(math.atan2(R[2, 1], R[2, 2]))
-        ry = math.degrees(math.atan2(-R[2, 0], sy))
-        rz = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+    This follows the robotics convention (Denavit-Hartenberg) where
+    transformations are applied directly as 4x4 homogeneous matrices.
+    """
+    # Convert numpy 4x4 matrix to CadQuery Matrix format (3x4)
+    # CadQuery expects rows 0-2, all 4 columns
+    matrix_list = [
+        [float(T[0, 0]), float(T[0, 1]), float(T[0, 2]), float(T[0, 3])],
+        [float(T[1, 0]), float(T[1, 1]), float(T[1, 2]), float(T[1, 3])],
+        [float(T[2, 0]), float(T[2, 1]), float(T[2, 2]), float(T[2, 3])],
+    ]
+    cq_matrix = cq.Matrix(matrix_list)
+    return shape.transformGeometry(cq_matrix)
+
+
+# =============================================================================
+# UP-VECTOR COMPUTATION HELPERS
+# =============================================================================
+
+def compute_initial_up_vector(
+    direction: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """
+    Compute the initial up-vector for a given direction.
+
+    For horizontal pipes, "up" is world +Z.
+    For vertical pipes, we choose a default horizontal "up".
+
+    Args:
+        direction: Direction the pipe travels (unit vector)
+
+    Returns:
+        Up-vector perpendicular to direction
+    """
+    dx, dy, dz = direction
+
+    # Check if direction is vertical (up or down)
+    if abs(dz) > 0.99:
+        # Pipe is vertical, use north (+Y) as "up" reference
+        return (0.0, 1.0, 0.0)
     else:
-        rx = math.degrees(math.atan2(-R[1, 2], R[1, 1]))
-        ry = math.degrees(math.atan2(-R[2, 0], sy))
-        rz = 0
+        # Pipe is horizontal, use world +Z as "up"
+        return (0.0, 0.0, 1.0)
 
-    # Apply rotations then translation
-    result = shape
-    if abs(rx) > 0.001:
-        result = result.rotate((0, 0, 0), (1, 0, 0), rx)
-    if abs(ry) > 0.001:
-        result = result.rotate((0, 0, 0), (0, 1, 0), ry)
-    if abs(rz) > 0.001:
-        result = result.rotate((0, 0, 0), (0, 0, 1), rz)
 
-    result = result.moved(cq.Location(cq.Vector(*pos)))
+def compute_up_vector_after_elbow(
+    incoming_direction: tuple[float, float, float],
+    outgoing_direction: tuple[float, float, float],
+    current_up: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """
+    Compute the new up-vector after traversing an elbow.
 
-    return result
+    The elbow turns the pipe from incoming_direction to outgoing_direction.
+    The up-vector needs to be rotated consistently.
+
+    The elbow's axis of rotation is perpendicular to both pipe directions.
+    The up-vector rotates around this axis along with the pipe direction.
+
+    Args:
+        incoming_direction: Direction before the elbow
+        outgoing_direction: Direction after the elbow
+        current_up: Current up-vector before the elbow
+
+    Returns:
+        New up-vector after the elbow
+    """
+    inc = np.array(incoming_direction)
+    out = np.array(outgoing_direction)
+    up = np.array(current_up)
+
+    # The elbow rotation axis is perpendicular to both pipe directions
+    # axis = incoming × outgoing (points in the direction of the elbow's Z)
+    axis = np.cross(inc, out)
+    axis_norm = np.linalg.norm(axis)
+
+    if axis_norm < 1e-6:
+        # Directions are parallel (shouldn't happen for 90° elbow)
+        return current_up
+
+    axis = axis / axis_norm
+
+    # The angle of rotation is the angle between incoming and outgoing (90° for standard elbow)
+    dot = np.clip(np.dot(inc, out), -1.0, 1.0)
+    angle = np.arccos(dot)  # In radians
+
+    # Rodrigues' rotation formula: rotate 'up' around 'axis' by 'angle'
+    # v_rot = v*cos(θ) + (axis × v)*sin(θ) + axis*(axis·v)*(1-cos(θ))
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+
+    up_rotated = (
+        up * cos_a +
+        np.cross(axis, up) * sin_a +
+        axis * np.dot(axis, up) * (1 - cos_a)
+    )
+
+    # Normalize
+    up_rotated = up_rotated / np.linalg.norm(up_rotated)
+
+    return (float(up_rotated[0]), float(up_rotated[1]), float(up_rotated[2]))
+
+
+def compute_up_vector_for_branch(
+    run_direction: tuple[float, float, float],
+    branch_direction: tuple[float, float, float],
+    current_up: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """
+    Compute the up-vector for a branch coming off a tee or cross.
+
+    The branch goes in a different direction than the run.
+    We need to compute an up-vector for the branch that maintains
+    consistency with the fitting's orientation.
+
+    Args:
+        run_direction: Direction of the run (continues straight)
+        branch_direction: Direction of the branch
+        current_up: Up-vector for the run
+
+    Returns:
+        Up-vector for the branch
+    """
+    run = np.array(run_direction)
+    branch = np.array(branch_direction)
+    up = np.array(current_up)
+
+    # The branch up-vector should be perpendicular to the branch direction
+    # and as aligned as possible with the current up-vector
+
+    # Project current_up onto the plane perpendicular to branch
+    # up_proj = up - (up · branch) * branch
+    up_proj = up - np.dot(up, branch) * branch
+    proj_norm = np.linalg.norm(up_proj)
+
+    if proj_norm < 1e-6:
+        # Up is parallel to branch, need alternative
+        # Use the cross product of branch with run to get a perpendicular
+        alt_up = np.cross(branch, run)
+        alt_norm = np.linalg.norm(alt_up)
+        if alt_norm > 1e-6:
+            return tuple(alt_up / alt_norm)
+        else:
+            # Branch and run are parallel (shouldn't happen for tee)
+            # Use world +Z or +Y as fallback
+            if abs(branch[2]) < 0.99:
+                return (0.0, 0.0, 1.0)
+            else:
+                return (0.0, 1.0, 0.0)
+
+    up_proj = up_proj / proj_norm
+    return (float(up_proj[0]), float(up_proj[1]), float(up_proj[2]))
+
+
+# =============================================================================
+# COORDINATE FRAME VISUALIZATION
+# =============================================================================
+
+def create_coordinate_frame_marker(
+    transform: np.ndarray,
+    scale: float = 25.0,
+    arrow_radius: float = 2.0,
+    cone_height: float = 8.0,
+    cone_radius: float = 4.0,
+) -> list[cq.Shape]:
+    """
+    Create coordinate frame marker arrows at a port location.
+
+    Creates three arrows representing the X, Y, Z axes:
+    - X-axis: Red (conventionally)
+    - Y-axis: Green (conventionally)
+    - Z-axis: Blue (conventionally)
+
+    Note: STEP files don't support colors, but the arrows are distinguishable
+    by their directions. X is the first axis, Y second, Z third.
+
+    Args:
+        transform: 4x4 transformation matrix for the port
+        scale: Length of the arrow shafts in mm
+        arrow_radius: Radius of the arrow shaft cylinders
+        cone_height: Height of the arrow tip cones
+        cone_radius: Radius of the arrow tip cones
+
+    Returns:
+        List of CadQuery shapes (3 arrows for X, Y, Z axes)
+    """
+    position = get_position(transform)
+    x_axis = get_x_axis(transform)
+    y_axis = get_y_axis(transform)
+    z_axis = get_z_axis(transform)
+
+    arrows = []
+
+    for axis_dir in [x_axis, y_axis, z_axis]:
+        # Normalize direction
+        dx, dy, dz = axis_dir
+        length = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if length < 1e-6:
+            continue
+        dx, dy, dz = dx/length, dy/length, dz/length
+
+        # Create arrow shaft (cylinder from origin along direction)
+        shaft = cq.Solid.makeCylinder(
+            arrow_radius,
+            scale,
+            cq.Vector(*position),
+            cq.Vector(dx, dy, dz),
+        )
+
+        # Create arrow tip (cone at end of shaft)
+        cone_start = (
+            position[0] + scale * dx,
+            position[1] + scale * dy,
+            position[2] + scale * dz,
+        )
+        cone = cq.Solid.makeCone(
+            cone_radius,
+            0.0,
+            cone_height,
+            cq.Vector(*cone_start),
+            cq.Vector(dx, dy, dz),
+        )
+
+        # Combine shaft and tip
+        arrow = shaft.fuse(cone)
+        arrows.append(arrow)
+
+    return arrows
+
+
+def create_port_markers_for_fitting(
+    fitting: "Fitting",
+    world_transform: np.ndarray,
+    scale: float = 25.0,
+) -> list[cq.Shape]:
+    """
+    Create coordinate frame markers for all ports on a fitting.
+
+    Args:
+        fitting: The Fitting object with ports
+        world_transform: World transform of the fitting
+        scale: Size of the coordinate frame markers
+
+    Returns:
+        List of CadQuery shapes (arrows for each port)
+    """
+    markers = []
+
+    for port in fitting.ports.values():
+        # Get port's world transform
+        port_world = world_transform @ port.transform
+        # Create markers for this port
+        port_markers = create_coordinate_frame_marker(port_world, scale=scale)
+        markers.extend(port_markers)
+
+    return markers
 
 
 # =============================================================================

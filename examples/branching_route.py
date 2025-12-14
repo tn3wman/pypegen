@@ -6,7 +6,13 @@ This example demonstrates the new RouteBuilder API with support for
 branching at tees, crosses, and mid-pipe weldolets.
 """
 
+from pathlib import Path
+
 from pypegen.route_builder import BranchBuilder, RouteBuilder
+
+# Output directory for STEP files
+OUTPUT_DIR = Path(__file__).parent / "output" / "step"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def simple_tee_example():
@@ -28,8 +34,8 @@ def simple_tee_example():
     route = builder.build()
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
-    route.export("simple_tee.step")
-    print("  Exported to simple_tee.step")
+    route.export(str(OUTPUT_DIR / "simple_tee.step"))
+    print(f"  Exported to {OUTPUT_DIR / 'simple_tee.step'}")
     return route
 
 
@@ -60,8 +66,8 @@ def nested_tee_example():
     route = builder.build()
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
-    route.export("nested_tees.step")
-    print("  Exported to nested_tees.step")
+    route.export(str(OUTPUT_DIR / "nested_tees.step"))
+    print(f"  Exported to {OUTPUT_DIR / 'nested_tees.step'}")
     return route
 
 
@@ -87,8 +93,8 @@ def cross_example():
     route = builder.build()
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
-    route.export("cross_fitting.step")
-    print("  Exported to cross_fitting.step")
+    route.export(str(OUTPUT_DIR / "cross_fitting.step"))
+    print(f"  Exported to {OUTPUT_DIR / 'cross_fitting.step'}")
     return route
 
 
@@ -115,8 +121,8 @@ def weldolet_example():
     route = builder.build()
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
-    route.export("weldolet_branch.step")
-    print("  Exported to weldolet_branch.step")
+    route.export(str(OUTPUT_DIR / "weldolet_branch.step"))
+    print(f"  Exported to {OUTPUT_DIR / 'weldolet_branch.step'}")
     return route
 
 
@@ -156,8 +162,8 @@ def composable_pattern_example():
     route = builder2.build()
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
-    route.export("composable_pattern.step")
-    print("  Exported to composable_pattern.step")
+    route.export(str(OUTPUT_DIR / "composable_pattern.step"))
+    print(f"  Exported to {OUTPUT_DIR / 'composable_pattern.step'}")
     return route
 
 
@@ -183,8 +189,8 @@ def chainable_config_example():
     print(f"  Parts: {len(route.parts)}")
     print(f"  Material: {route.material}")
     print(f"  Schedule: {route.schedule}")
-    route.export("chainable_config.step")
-    print("  Exported to chainable_config.step")
+    route.export(str(OUTPUT_DIR / "chainable_config.step"))
+    print(f"  Exported to {OUTPUT_DIR / 'chainable_config.step'}")
     return route
 
 
