@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import cadquery as cq
 
+from .npt_thread import get_npt_spec, make_npt_internal_thread
 from .threaded_elbow import NPT_THREAD_ENGAGEMENT, PIPE_OD
 
 # =============================================================================
@@ -119,6 +120,7 @@ ASME_B1611_THREADED_TEE_CLASS3000: dict[str, ThreadedTeeDims] = {
 def make_threaded_tee(
     nps: str,
     pressure_class: int = 3000,
+    include_threads: bool = False,
 ) -> cq.Shape:
     """
     Create an ASME B16.11 NPT threaded equal tee.
@@ -133,6 +135,7 @@ def make_threaded_tee(
     Args:
         nps: Nominal pipe size (e.g., "1/2", "2", "4")
         pressure_class: 3000 only currently implemented
+        include_threads: If True, add actual NPT internal thread geometry
 
     Returns:
         CadQuery Shape of the tee
@@ -199,7 +202,31 @@ def make_threaded_tee(
     # Cut the bores
     tee_shape = tee_body.cut(run_bore).cut(branch_bore)
 
-    # No socket counterbores for threaded fittings
+    # Add internal threads if requested
+    if include_threads:
+        npt_spec = get_npt_spec(nps)
+        thread_length = min(dims.min_thread_length, npt_spec.L2)
+
+        # Create internal thread (generated along +Z axis)
+        thread = make_npt_internal_thread(nps, thread_length=thread_length)
+
+        # Inlet (run-in): Thread at -X end, axis along +X (pointing into fitting)
+        # Position at (-A, 0, 0), rotate so +Z points to +X
+        thread_inlet = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))  # Rotate +Z to +X
+        thread_inlet = thread_inlet.moved(cq.Location(cq.Vector(-A, 0, 0)))  # Translate to inlet position
+        tee_shape = tee_shape.fuse(thread_inlet)
+
+        # Run (run-out): Thread at +X end, axis along -X (pointing into fitting)
+        # Position at (A, 0, 0), rotate so +Z points to -X
+        thread_run = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Rotate +Z to -X
+        thread_run = thread_run.moved(cq.Location(cq.Vector(A, 0, 0)))  # Translate to run position
+        tee_shape = tee_shape.fuse(thread_run)
+
+        # Branch: Thread at +Y end, axis along -Y (pointing into fitting)
+        # Position at (0, A, 0), rotate so +Z points to -Y
+        thread_branch = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))  # Rotate +Z to -Y
+        thread_branch = thread_branch.moved(cq.Location(cq.Vector(0, A, 0)))  # Translate to branch position
+        tee_shape = tee_shape.fuse(thread_branch)
 
     return tee_shape
 

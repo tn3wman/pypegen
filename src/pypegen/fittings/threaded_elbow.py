@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import cadquery as cq
 
+from pypegen.fittings.npt_thread import get_npt_spec, make_npt_internal_thread
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -245,6 +247,7 @@ PIPE_OD: dict[str, float] = {
 def make_threaded_elbow_90(
     nps: str,
     pressure_class: int = 3000,
+    include_threads: bool = False,
 ) -> cq.Shape:
     """
     Create an ASME B16.11 90° NPT threaded elbow.
@@ -257,6 +260,7 @@ def make_threaded_elbow_90(
     Args:
         nps: Nominal pipe size (e.g., "1/2", "2", "4")
         pressure_class: 3000 only currently implemented
+        include_threads: If True, add actual NPT internal thread geometry
 
     Returns:
         CadQuery Shape of the elbow
@@ -310,8 +314,25 @@ def make_threaded_elbow_90(
     # Cut inner from outer to create hollow elbow
     elbow = outer.cut(inner)
 
-    # No socket counterbores for threaded fittings - the bore is sized
-    # for the pipe OD and internal threads engage the pipe
+    # Add internal threads if requested
+    if include_threads:
+        npt_spec = get_npt_spec(nps)
+        thread_length = min(dims.min_thread_length, npt_spec.L2)
+
+        # Create internal thread (generated along +Z axis)
+        thread = make_npt_internal_thread(nps, thread_length=thread_length)
+
+        # Leg 1 (inlet): Thread at end of leg, axis along -X
+        # Position at (A, 0, 0), rotate so +Z points to -X
+        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Rotate +Z to -X
+        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Translate to inlet position
+        elbow = elbow.fuse(thread1)
+
+        # Leg 2 (outlet): Thread at end of leg, axis along +Y
+        # Position at (0, A, 0), rotate so +Z points to +Y
+        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), -90))  # Rotate +Z to +Y
+        thread2 = thread2.moved(cq.Location(cq.Vector(0, A, 0)))  # Translate to outlet position
+        elbow = elbow.fuse(thread2)
 
     return elbow
 
@@ -319,6 +340,7 @@ def make_threaded_elbow_90(
 def make_threaded_elbow_45(
     nps: str,
     pressure_class: int = 3000,
+    include_threads: bool = False,
 ) -> cq.Shape:
     """
     Create an ASME B16.11 45° NPT threaded elbow.
@@ -330,6 +352,7 @@ def make_threaded_elbow_45(
     Args:
         nps: Nominal pipe size (e.g., "1/2", "2", "4")
         pressure_class: 3000 only currently implemented
+        include_threads: If True, add actual NPT internal thread geometry
 
     Returns:
         CadQuery Shape of the elbow
@@ -405,6 +428,30 @@ def make_threaded_elbow_45(
 
     # Cut inner from outer
     elbow = outer.cut(inner)
+
+    # Add internal threads if requested
+    if include_threads:
+        npt_spec = get_npt_spec(nps)
+        thread_length = min(dims.min_thread_length, npt_spec.L2)
+
+        # Create internal thread (generated along +Z axis)
+        thread = make_npt_internal_thread(nps, thread_length=thread_length)
+
+        # Leg 1 (inlet): Thread at end of leg, axis along -X
+        # Position at (A, 0, 0), rotate so +Z points to -X
+        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Rotate +Z to -X
+        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Translate to inlet position
+        elbow = elbow.fuse(thread1)
+
+        # Leg 2 (outlet): Thread at end of leg, axis along 135° direction
+        # Position at outlet end, rotate so +Z points in outlet direction
+        outlet_end_x = A * dir_x
+        outlet_end_y = A * dir_y
+        # Rotate +Z to point toward (dir_x, dir_y, 0) = 135° from +X
+        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 135))  # Rotate around Z
+        thread2 = thread2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), -90))  # Tilt so +Z points outward
+        thread2 = thread2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))  # Translate to outlet position
+        elbow = elbow.fuse(thread2)
 
     return elbow
 

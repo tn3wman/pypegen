@@ -12,6 +12,7 @@ from typing import Literal
 
 import cadquery as cq
 
+from .fittings.npt_thread import get_npt_spec, make_npt_external_thread
 from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000
 
 # =============================================================================
@@ -195,6 +196,100 @@ def trim_segment_for_socket(seg: Segment, at_start: bool, port: PortDef) -> Segm
     else:
         new_end = seg.end - dir_vec * insertion
         return Segment(start=seg.start, end=new_end)
+
+
+# NPS to ASME size mapping for threaded pipe
+NPS_TO_ASME_THREADED: dict[str, str] = {
+    "1/8in": "1/8",
+    "1/4in": "1/4",
+    "3/8in": "3/8",
+    "1/2in": "1/2",
+    "3/4in": "3/4",
+    "1in": "1",
+    "1.25in": "1-1/4",
+    "1-1/4in": "1-1/4",
+    "1.5in": "1-1/2",
+    "1-1/2in": "1-1/2",
+    "2in": "2",
+    "2.5in": "2-1/2",
+    "2-1/2in": "2-1/2",
+    "3in": "3",
+    "4in": "4",
+}
+
+
+def make_threaded_pipe(
+    nps: str,
+    length: float,
+    thread_end: Literal["none", "inlet", "outlet", "both"] = "both",
+    include_threads: bool = True,
+) -> cq.Shape:
+    """
+    Create a pipe with NPT external threads on one or both ends.
+
+    The pipe is oriented with:
+    - Axis along +Z
+    - Inlet (start) at Z=0
+    - Outlet (end) at Z=length
+
+    Args:
+        nps: Nominal pipe size. Can be ASME format ("1/2", "1", "2")
+             or inch format ("1/2in", "1in", "2in")
+        length: Total length of pipe in mm
+        thread_end: Which ends to thread:
+            - "none": No threads (plain pipe)
+            - "inlet": Thread only the Z=0 end
+            - "outlet": Thread only the Z=length end
+            - "both": Thread both ends (default)
+        include_threads: If True, add actual NPT thread geometry.
+                        If False, return plain pipe (same as thread_end="none")
+
+    Returns:
+        CadQuery Shape of the threaded pipe
+    """
+    # Normalize NPS format
+    asme_nps = NPS_TO_ASME_THREADED.get(nps, nps)
+
+    # Get NPT spec for dimensions
+    npt_spec = get_npt_spec(asme_nps)
+
+    # Pipe dimensions
+    pipe_od = npt_spec.od
+    # For NPT, wall thickness is typically schedule 80 or standard pipe
+    # We'll use a reasonable wall thickness
+    wall_thickness = npt_spec.thread_depth * 2  # Approximate
+    pipe_id = pipe_od - 2 * wall_thickness
+
+    # Create the base pipe
+    r_outer = pipe_od / 2.0
+    r_inner = pipe_id / 2.0
+
+    outer_cyl = cq.Solid.makeCylinder(r_outer, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+    inner_cyl = cq.Solid.makeCylinder(r_inner, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+    pipe = outer_cyl.cut(inner_cyl)
+
+    # Add threads if requested
+    if not include_threads or thread_end == "none":
+        return pipe
+
+    thread_length = npt_spec.L2  # Effective thread length
+
+    if thread_end in ("inlet", "both"):
+        # Thread at Z=0 (inlet), extending into the pipe (+Z direction)
+        thread_inlet = make_npt_external_thread(asme_nps, thread_length=thread_length)
+        # Thread is generated along +Z, so just position at Z=0
+        # No rotation needed since pipe axis is already +Z
+        pipe = pipe.fuse(thread_inlet)
+
+    if thread_end in ("outlet", "both"):
+        # Thread at Z=length (outlet), extending into the pipe (-Z direction)
+        thread_outlet = make_npt_external_thread(asme_nps, thread_length=thread_length)
+        # Rotate 180° around X to flip +Z to -Z, then translate to outlet end
+        thread_outlet = thread_outlet.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180))
+        thread_outlet = thread_outlet.moved(cq.Location(cq.Vector(0, 0, length)))
+        pipe = pipe.fuse(thread_outlet)
+
+    return pipe
 
 
 # =============================================================================
