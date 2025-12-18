@@ -207,26 +207,34 @@ def make_threaded_tee(
         npt_spec = get_npt_spec(nps)
         thread_length = min(dims.min_thread_length, npt_spec.L2)
 
-        # Create internal thread (generated along +Z axis)
+        # Create internal thread (generated along +Z axis, represents volume to CUT)
+        # Thread starts at Z=0 (smaller opening) and expands toward Z=thread_length (larger opening)
+        # When cutting, the smaller opening should be at the fitting face
         thread = make_npt_internal_thread(nps, thread_length=thread_length)
 
-        # Inlet (run-in): Thread at -X end, axis along +X (pointing into fitting)
-        # Position at (-A, 0, 0), rotate so +Z points to +X
-        thread_inlet = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))  # Rotate +Z to +X
-        thread_inlet = thread_inlet.moved(cq.Location(cq.Vector(-A, 0, 0)))  # Translate to inlet position
-        tee_shape = tee_shape.fuse(thread_inlet)
+        # Inlet (run-in): Thread at -X end
+        # Face at x=-A, thread extends toward center (x=0)
+        # Ry(-90°): (x,y,z) -> (z, y, -x), so (0,0,0)->(0,0,0), (0,0,L)->(L,0,0)
+        # After translate (-A,0,0): smaller at (-A,0,0), larger at (-A+L,0,0) toward center ✓
+        thread_inlet = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))  # +Z to +X
+        thread_inlet = thread_inlet.moved(cq.Location(cq.Vector(-A, 0, 0)))  # Position at inlet face
+        tee_shape = tee_shape.cut(thread_inlet)
 
-        # Run (run-out): Thread at +X end, axis along -X (pointing into fitting)
-        # Position at (A, 0, 0), rotate so +Z points to -X
-        thread_run = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Rotate +Z to -X
-        thread_run = thread_run.moved(cq.Location(cq.Vector(A, 0, 0)))  # Translate to run position
-        tee_shape = tee_shape.fuse(thread_run)
+        # Run (run-out): Thread at +X end
+        # Face at x=A, thread extends toward center (x=0)
+        # Ry(+90°): (x,y,z) -> (-z, y, x), so (0,0,0)->(0,0,0), (0,0,L)->(-L,0,0)
+        # After translate (A,0,0): smaller at (A,0,0), larger at (A-L,0,0) toward center ✓
+        thread_run = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # +Z to -X
+        thread_run = thread_run.moved(cq.Location(cq.Vector(A, 0, 0)))  # Position at run-out face
+        tee_shape = tee_shape.cut(thread_run)
 
-        # Branch: Thread at +Y end, axis along -Y (pointing into fitting)
-        # Position at (0, A, 0), rotate so +Z points to -Y
-        thread_branch = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))  # Rotate +Z to -Y
-        thread_branch = thread_branch.moved(cq.Location(cq.Vector(0, A, 0)))  # Translate to branch position
-        tee_shape = tee_shape.fuse(thread_branch)
+        # Branch: Thread at +Y end
+        # Face at y=A, thread extends toward center (y=0)
+        # Rx(+90°): (x,y,z) -> (x, -z, y), so (0,0,0)->(0,0,0), (0,0,L)->(0,-L,0)
+        # After translate (0,A,0): smaller at (0,A,0), larger at (0,A-L,0) toward center ✓
+        thread_branch = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))  # +Z to -Y
+        thread_branch = thread_branch.moved(cq.Location(cq.Vector(0, A, 0)))  # Position at branch face
+        tee_shape = tee_shape.cut(thread_branch)
 
     return tee_shape
 

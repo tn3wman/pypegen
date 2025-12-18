@@ -319,20 +319,35 @@ def make_threaded_elbow_90(
         npt_spec = get_npt_spec(nps)
         thread_length = min(dims.min_thread_length, npt_spec.L2)
 
-        # Create internal thread (generated along +Z axis)
+        # Create internal thread (generated along +Z axis, represents volume to CUT)
+        # Thread starts at Z=0 (smaller opening) and expands toward Z=thread_length (larger opening)
+        # When cutting, the smaller opening should be at the fitting face
+        # and the larger opening should be deeper inside the fitting
         thread = make_npt_internal_thread(nps, thread_length=thread_length)
 
-        # Leg 1 (inlet): Thread at end of leg, axis along -X
-        # Position at (A, 0, 0), rotate so +Z points to -X
-        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Rotate +Z to -X
-        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Translate to inlet position
-        elbow = elbow.fuse(thread1)
+        # Leg 1 (inlet): Thread at +X end
+        # The fitting face is at +X (x=A), and the thread should extend toward center (toward x=0)
+        # Rotate +90° around Y: +Z maps to +X direction
+        # After rotation: Z=0 (smaller) is at origin, Z=L (larger) is at +X
+        # After translation to (A,0,0): smaller at (A,0,0), larger at (A-L,0,0) toward center
+        # Wait, that's wrong. Let me re-derive:
+        # Ry(+90°): (x,y,z) -> (-z, y, x)
+        # Point (0,0,0) -> (0,0,0)
+        # Point (0,0,L) -> (-L,0,0)
+        # After translate (A,0,0): smaller at (A,0,0), larger at (A-L,0,0) ✓
+        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # +Z to -X
+        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Position at inlet face
+        elbow = elbow.cut(thread1)
 
-        # Leg 2 (outlet): Thread at end of leg, axis along +Y
-        # Position at (0, A, 0), rotate so +Z points to +Y
-        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), -90))  # Rotate +Z to +Y
-        thread2 = thread2.moved(cq.Location(cq.Vector(0, A, 0)))  # Translate to outlet position
-        elbow = elbow.fuse(thread2)
+        # Leg 2 (outlet): Thread at +Y end
+        # Fitting face is at +Y (y=A), thread should extend toward center (toward y=0)
+        # Rotate +90° around X: (x,y,z) -> (x, -z, y)
+        # Point (0,0,0) -> (0,0,0)
+        # Point (0,0,L) -> (0,-L,0)
+        # After translate (0,A,0): smaller at (0,A,0), larger at (0,A-L,0) ✓
+        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))  # +Z to -Y
+        thread2 = thread2.moved(cq.Location(cq.Vector(0, A, 0)))  # Position at outlet face
+        elbow = elbow.cut(thread2)
 
     return elbow
 
@@ -434,24 +449,30 @@ def make_threaded_elbow_45(
         npt_spec = get_npt_spec(nps)
         thread_length = min(dims.min_thread_length, npt_spec.L2)
 
-        # Create internal thread (generated along +Z axis)
+        # Create internal thread (generated along +Z axis, represents volume to CUT)
+        # Thread starts at Z=0 (smaller opening) and expands toward Z=thread_length (larger opening)
         thread = make_npt_internal_thread(nps, thread_length=thread_length)
 
-        # Leg 1 (inlet): Thread at end of leg, axis along -X
-        # Position at (A, 0, 0), rotate so +Z points to -X
-        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Rotate +Z to -X
-        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Translate to inlet position
-        elbow = elbow.fuse(thread1)
+        # Leg 1 (inlet): Thread at +X end
+        # Same as 90° elbow - Ry(+90°): smaller at face, larger toward center
+        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # +Z to -X
+        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Position at inlet face
+        elbow = elbow.cut(thread1)
 
-        # Leg 2 (outlet): Thread at end of leg, axis along 135° direction
-        # Position at outlet end, rotate so +Z points in outlet direction
+        # Leg 2 (outlet): Thread at 135° end
+        # The outlet is at angle 135° from +X in XY plane
+        # Thread should extend from face toward center
+        # First rotate around Z to align with outlet direction, then tilt
         outlet_end_x = A * dir_x
         outlet_end_y = A * dir_y
-        # Rotate +Z to point toward (dir_x, dir_y, 0) = 135° from +X
-        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 135))  # Rotate around Z
-        thread2 = thread2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), -90))  # Tilt so +Z points outward
-        thread2 = thread2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))  # Translate to outlet position
-        elbow = elbow.fuse(thread2)
+        # The thread +Z needs to point toward center, which is at -135° = -135° from +X
+        # Or equivalently, 45° + 180° = 225° from +X
+        # Rotate around Z by 45° to get +X pointing toward center direction
+        # Then rotate around the new Y to tilt +Z into the XY plane pointing toward center
+        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Tilt +Z to -X
+        thread2 = thread2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), -45))  # Rotate to outlet direction
+        thread2 = thread2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))  # Position at outlet face
+        elbow = elbow.cut(thread2)
 
     return elbow
 

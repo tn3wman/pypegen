@@ -12,7 +12,7 @@ from typing import Literal
 
 import cadquery as cq
 
-from .fittings.npt_thread import get_npt_spec, make_npt_external_thread
+from .fittings.npt_thread import get_npt_spec
 from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000
 
 # =============================================================================
@@ -260,34 +260,87 @@ def make_threaded_pipe(
     wall_thickness = npt_spec.thread_depth * 2  # Approximate
     pipe_id = pipe_od - 2 * wall_thickness
 
-    # Create the base pipe
     r_outer = pipe_od / 2.0
     r_inner = pipe_id / 2.0
 
-    outer_cyl = cq.Solid.makeCylinder(r_outer, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
-    inner_cyl = cq.Solid.makeCylinder(r_inner, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
-    pipe = outer_cyl.cut(inner_cyl)
-
-    # Add threads if requested
+    # If no threads requested, return plain pipe
     if not include_threads or thread_end == "none":
-        return pipe
+        outer_cyl = cq.Solid.makeCylinder(r_outer, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+        inner_cyl = cq.Solid.makeCylinder(r_inner, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+        return outer_cyl.cut(inner_cyl)
 
     thread_length = npt_spec.L2  # Effective thread length
 
-    if thread_end in ("inlet", "both"):
-        # Thread at Z=0 (inlet), extending into the pipe (+Z direction)
-        thread_inlet = make_npt_external_thread(asme_nps, thread_length=thread_length)
-        # Thread is generated along +Z, so just position at Z=0
-        # No rotation needed since pipe axis is already +Z
-        pipe = pipe.fuse(thread_inlet)
+    # Build pipe in sections:
+    # - Threaded inlet section (with bore)
+    # - Plain middle section
+    # - Threaded outlet section (with bore)
 
-    if thread_end in ("outlet", "both"):
-        # Thread at Z=length (outlet), extending into the pipe (-Z direction)
-        thread_outlet = make_npt_external_thread(asme_nps, thread_length=thread_length)
-        # Rotate 180° around X to flip +Z to -Z, then translate to outlet end
-        thread_outlet = thread_outlet.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180))
-        thread_outlet = thread_outlet.moved(cq.Location(cq.Vector(0, 0, length)))
-        pipe = pipe.fuse(thread_outlet)
+    from .fittings.npt_thread import make_npt_external_thread
+
+    inlet_threaded = thread_end in ("inlet", "both")
+    outlet_threaded = thread_end in ("outlet", "both")
+
+    # Calculate section bounds
+    inlet_len = thread_length if inlet_threaded else 0
+    outlet_len = thread_length if outlet_threaded else 0
+    plain_start = inlet_len
+    plain_end = length - outlet_len
+    plain_len = plain_end - plain_start
+
+    sections = []
+
+    # Inlet threaded section
+    # Thread comes in canonical orientation: Z=0 SMALL, Z=thread_length LARGE
+    # For inlet (free end at Z=0): need SMALL at Z=0 (free end), LARGE at Z=thread_length
+    # NO flip needed - canonical orientation already has small at Z=0
+    if inlet_threaded:
+        inlet_section = make_npt_external_thread(
+            asme_nps, thread_length=thread_length, pipe_id=pipe_id
+        )
+        # No transformation needed - Z=0 already has SMALL diameter (free end)
+        sections.append(inlet_section)
+
+    # Plain middle section
+    if plain_len > 0:
+        plain_outer = cq.Solid.makeCylinder(
+            r_outer, plain_len, cq.Vector(0, 0, plain_start), cq.Vector(0, 0, 1)
+        )
+        plain_inner = cq.Solid.makeCylinder(
+            r_inner, plain_len, cq.Vector(0, 0, plain_start), cq.Vector(0, 0, 1)
+        )
+        plain_section = plain_outer.cut(plain_inner)
+        sections.append(plain_section)
+
+    # Outlet threaded section
+    # Thread comes in canonical orientation: Z=0 SMALL, Z=thread_length LARGE
+    # For outlet (free end at Z=length): need SMALL at Z=length (free end), LARGE at Z=length-thread_length
+    # FLIP so small end is at Z=length
+    if outlet_threaded:
+        outlet_section = make_npt_external_thread(
+            asme_nps, thread_length=thread_length, pipe_id=pipe_id
+        )
+        # Flip 180° around X axis: Z=0 (SMALL) stays at Z=0, Z=thread_length (LARGE) -> Z=-thread_length
+        outlet_section = outlet_section.moved(
+            cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180)
+        )
+        # Translate so flipped thread ends at Z=length
+        # After flip: SMALL at Z=0, LARGE at Z=-thread_length
+        # Translate by length: SMALL at Z=length, LARGE at Z=length-thread_length
+        outlet_section = outlet_section.moved(
+            cq.Location(cq.Vector(0, 0, length))
+        )
+        sections.append(outlet_section)
+
+    # Fuse all sections
+    if not sections:
+        outer_cyl = cq.Solid.makeCylinder(r_outer, length)
+        inner_cyl = cq.Solid.makeCylinder(r_inner, length)
+        return outer_cyl.cut(inner_cyl)
+
+    pipe = sections[0]
+    for section in sections[1:]:
+        pipe = pipe.fuse(section)
 
     return pipe
 
