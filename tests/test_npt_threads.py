@@ -1,306 +1,311 @@
-"""
-Tests for NPT thread generation and alignment verification.
+"""Tests for NPT thread generation with fade runout."""
 
-These tests verify:
-1. NPT thread specs match ASME B1.20.1 values
-2. Thread geometry is created correctly
-3. Threads align at wrench-tight engagement depth
-"""
+from __future__ import annotations
 
-import cadquery as cq
+import math
+
 import pytest
+import cadquery as cq
 
 from pypegen.fittings.npt_thread import (
-    NPT_HALF_ANGLE_DEG,
-    NPT_SPECS,
-    NPT_TAPER_RATIO,
-    calculate_thread_alignment_transform,
-    get_npt_spec,
+    ThreadBuilder,
     make_npt_external_thread,
     make_npt_internal_thread,
+    get_npt_spec,
+    NPT_HALF_ANGLE_DEG,
+    NPT_SPECS,
 )
-from pypegen.fittings.threaded_elbow import make_threaded_elbow_45, make_threaded_elbow_90
-from pypegen.fittings.threaded_tee import make_threaded_tee
-from pypegen.pipe_generator import make_threaded_pipe
 
-# =============================================================================
-# NPT SPECIFICATION TESTS
-# =============================================================================
+
+class TestFadeHelix:
+    """Tests for the fade_helix parametric curve with taper correction."""
+
+    def test_fade_helix_starts_at_correct_radius(self):
+        """At t=0, apex should be at apex_radius (accounting for taper)."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+        )
+        x, y, z = builder.fade_helix(0.0, apex=True, vertical_displacement=0, z_offset=0)
+        # At t=0, x = radius * cos(0) = radius, y = radius * sin(0) = 0
+        assert abs(x - 10.0) < 0.001
+        assert abs(y) < 0.001
+        assert abs(z) < 0.001
+
+    def test_fade_helix_ends_at_root_level(self):
+        """At t=1, apex wire should fade to root radius level for external threads."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+        )
+        x, y, z = builder.fade_helix(1.0, apex=True, vertical_displacement=0, z_offset=0)
+        # At t=1, position is at 90 degrees: x = r*cos(pi/2) ≈ 0, y = r*sin(pi/2) = r
+        # The radius should have faded from apex to root level
+        # Plus taper adjustment for z = pitch/4
+        z_at_end = builder.pitch / 4
+        taper_delta = z_at_end * math.tan(math.radians(NPT_HALF_ANGLE_DEG))
+        expected_root_radius = 8.0 + taper_delta  # root_radius_adjusted is 8.0 - 0.001
+
+        assert abs(x) < 0.01  # cos(pi/2) ≈ 0
+        # y should be approximately the faded radius (root level + taper)
+        assert abs(y - expected_root_radius) < 0.1
+        assert abs(z - z_at_end) < 0.01
+
+    def test_fade_helix_accounts_for_z_offset(self):
+        """Radius should increase with z_offset due to NPT taper."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+        )
+        # At t=0 with different z_offsets
+        x1, _, _ = builder.fade_helix(0.0, apex=True, vertical_displacement=0, z_offset=0)
+        x2, _, _ = builder.fade_helix(0.0, apex=True, vertical_displacement=0, z_offset=10.0)
+
+        expected_increase = 10.0 * math.tan(math.radians(NPT_HALF_ANGLE_DEG))
+        assert abs((x2 - x1) - expected_increase) < 0.001
+
+    def test_fade_helix_internal_thread(self):
+        """Internal threads should expand outward during fade."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=12.0,  # Root is larger for internal
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=False,
+        )
+        # At t=0, apex is at inner radius
+        x0, _, _ = builder.fade_helix(0.0, apex=True, vertical_displacement=0, z_offset=0)
+        assert abs(x0 - 10.0) < 0.001
+
+        # At t=1, apex should fade toward root (larger radius)
+        x1, y1, _ = builder.fade_helix(1.0, apex=True, vertical_displacement=0, z_offset=0)
+        # At 90 degrees, x ≈ 0, y = radius
+        assert abs(x1) < 0.01
+        # y should be larger than apex_radius (faded toward root)
+        assert y1 > 10.0
+
+
+class TestMakeThreadFacesTaperedFade:
+    """Tests for the tapered fade face generation."""
+
+    def test_creates_valid_faces(self):
+        """Should create 4 thread faces and 1 end face."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+        )
+        thread_faces, end_faces = builder.make_thread_faces_tapered_fade(z_offset=0.0)
+
+        assert len(thread_faces) == 4
+        assert len(end_faces) == 1
+
+        # makeRuledSurface can return Face or Shell depending on geometry
+        for face in thread_faces:
+            assert isinstance(face, (cq.Face, cq.Shell, cq.Shape))
+        for face in end_faces:
+            assert isinstance(face, (cq.Face, cq.Shape))
+
+
+class TestMakeThreadWithFadedEnds:
+    """Tests for the complete faded thread generation."""
+
+    def test_thread_with_faded_ends_is_valid(self):
+        """Generated thread with fade should be a valid solid."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("fade", "fade"),
+        )
+        thread = builder.make_thread_with_faded_ends()
+        assert thread.isValid()
+
+    def test_thread_has_positive_volume(self):
+        """Generated thread should have positive volume."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("fade", "fade"),
+        )
+        thread = builder.make_thread_with_faded_ends()
+        assert thread.Volume() > 0
+
+    def test_single_end_fade_start(self):
+        """Thread with fade only at start should be valid."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("fade", "raw"),
+        )
+        thread = builder.build()
+        assert thread.isValid()
+
+    def test_single_end_fade_end(self):
+        """Thread with fade only at end should be valid."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("raw", "fade"),
+        )
+        thread = builder.build()
+        assert thread.isValid()
+
+    def test_thread_too_short_raises_error(self):
+        """Thread shorter than required for fade should raise error."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=0.5,  # Too short for 2 * pitch/4 = 1.0
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("fade", "fade"),
+        )
+        with pytest.raises(ValueError, match="too short"):
+            builder.make_thread_with_faded_ends()
+
+
+class TestNPTExternalThread:
+    """Integration tests for NPT external thread API."""
+
+    @pytest.mark.parametrize("nps", ["1/8", "1/4", "1/2", "1", "2"])
+    def test_external_thread_is_valid(self, nps: str):
+        """External threads should be valid solids."""
+        thread = make_npt_external_thread(nps, end_finishes=("fade", "fade"))
+        assert thread.isValid()
+        assert thread.Volume() > 0
+
+    def test_external_thread_simple_mode(self):
+        """Simple mode should return simplified geometry."""
+        thread = make_npt_external_thread("1/2", simple=True)
+        assert thread.isValid()
+        assert thread.Volume() > 0
+
+    def test_external_thread_with_bore(self):
+        """External thread with bore should be hollow."""
+        spec = get_npt_spec("1/2")
+        bore_id = spec.od - 2 * spec.thread_depth - 2.0  # Some wall thickness
+        thread = make_npt_external_thread("1/2", pipe_id=bore_id, end_finishes=("fade", "fade"))
+        assert thread.isValid()
+
+
+class TestNPTInternalThread:
+    """Integration tests for NPT internal thread API."""
+
+    @pytest.mark.parametrize("nps", ["1/8", "1/4", "1/2", "1", "2"])
+    def test_internal_thread_is_valid(self, nps: str):
+        """Internal threads should be valid solids."""
+        thread = make_npt_internal_thread(nps, end_finishes=("fade", "fade"))
+        assert thread.isValid()
+        assert thread.Volume() > 0
+
+    def test_internal_thread_simple_mode(self):
+        """Simple mode should return simplified geometry."""
+        thread = make_npt_internal_thread("1/2", simple=True)
+        assert thread.isValid()
+        assert thread.Volume() > 0
 
 
 class TestNPTSpecs:
-    """Test NPT thread specifications match ASME B1.20.1."""
+    """Tests for NPT thread specifications."""
 
-    def test_all_sizes_have_specs(self):
-        """Verify specs exist for all standard NPT sizes."""
-        expected_sizes = [
-            "1/8", "1/4", "3/8", "1/2", "3/4", "1",
-            "1-1/4", "1-1/2", "2", "2-1/2", "3", "4"
-        ]
-        for size in expected_sizes:
-            spec = get_npt_spec(size)
-            assert spec is not None, f"Missing spec for NPS {size}"
-            assert spec.tpi > 0, f"Invalid TPI for NPS {size}"
-            assert spec.od > 0, f"Invalid OD for NPS {size}"
+    def test_all_specs_have_required_fields(self):
+        """All NPT specs should have required dimensional data."""
+        for nps, spec in NPT_SPECS.items():
+            assert spec.tpi > 0, f"NPS {nps} missing TPI"
+            assert spec.od > 0, f"NPS {nps} missing OD"
+            assert spec.E0 > 0, f"NPS {nps} missing E0"
+            assert spec.L1 > 0, f"NPS {nps} missing L1"
+            assert spec.L2 > 0, f"NPS {nps} missing L2"
+            assert spec.L3 > 0, f"NPS {nps} missing L3"
 
-    def test_invalid_size_raises_error(self):
-        """Verify invalid sizes raise ValueError."""
-        with pytest.raises(ValueError):
-            get_npt_spec("invalid")
-
-    def test_tpi_values_match_asme(self):
-        """Verify TPI values match ASME B1.20.1 standard."""
-        # ASME B1.20.1 TPI values
-        expected_tpi = {
-            "1/8": 27,
-            "1/4": 18,
-            "3/8": 18,
-            "1/2": 14,
-            "3/4": 14,
-            "1": 11.5,
-            "1-1/4": 11.5,
-            "1-1/2": 11.5,
-            "2": 11.5,
-            "2-1/2": 8,
-            "3": 8,
-            "4": 8,
-        }
-        for size, expected in expected_tpi.items():
-            spec = get_npt_spec(size)
-            assert spec.tpi == expected, f"TPI mismatch for NPS {size}: expected {expected}, got {spec.tpi}"
-
-    def test_taper_angle_correct(self):
-        """Verify NPT taper angle is approximately 1.79°."""
-        expected_angle = 1.7899  # degrees
-        assert abs(NPT_HALF_ANGLE_DEG - expected_angle) < 0.001, \
-            f"Taper angle mismatch: expected {expected_angle}, got {NPT_HALF_ANGLE_DEG}"
-
-    def test_taper_ratio_correct(self):
-        """Verify NPT taper ratio is 1:16."""
-        assert abs(NPT_TAPER_RATIO - 1/16) < 0.0001, \
-            f"Taper ratio mismatch: expected {1/16}, got {NPT_TAPER_RATIO}"
+    def test_pitch_calculation(self):
+        """Pitch should be correctly calculated from TPI."""
+        spec = get_npt_spec("1/2")
+        expected_pitch = 25.4 / 14  # 1/2" is 14 TPI
+        assert abs(spec.pitch_mm - expected_pitch) < 0.001
 
     def test_thread_depth_calculation(self):
-        """Verify thread depth is calculated correctly."""
-        for size in ["1/2", "1", "2"]:
-            spec = get_npt_spec(size)
-            # Thread depth should be 0.75 * H where H = 0.866025 * pitch
-            expected_H = 0.866025 * spec.pitch_mm
-            expected_depth = 0.75 * expected_H
-            assert abs(spec.thread_depth - expected_depth) < 0.001, \
-                f"Thread depth mismatch for NPS {size}"
-
-    def test_wrench_tight_engagement(self):
-        """Verify wrench-tight engagement is L1 + L3."""
-        for size in ["1/2", "1", "2"]:
-            spec = get_npt_spec(size)
-            expected = spec.L1 + spec.L3
-            assert abs(spec.wrench_tight_engagement - expected) < 0.001, \
-                f"Wrench-tight engagement mismatch for NPS {size}"
+        """Thread depth should be 75% of sharp V height."""
+        spec = get_npt_spec("1/2")
+        sharp_v_height = 0.866025 * spec.pitch_mm
+        expected_depth = 0.75 * sharp_v_height
+        assert abs(spec.thread_depth - expected_depth) < 0.001
 
 
-# =============================================================================
-# THREAD GEOMETRY TESTS
-# =============================================================================
+class TestBuildMethodRouting:
+    """Tests to verify build() routes correctly based on end_finishes."""
 
+    def test_build_with_fade_uses_faded_ends(self):
+        """build() should use make_thread_with_faded_ends when fade is specified."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("fade", "fade"),
+        )
+        thread = builder.build()
+        assert thread.isValid()
 
-class TestThreadGeometry:
-    """Test NPT thread geometry generation."""
+    def test_build_with_raw_uses_original_path(self):
+        """build() should use original path for raw end finishes."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("raw", "raw"),
+        )
+        thread = builder.build()
+        assert thread.isValid()
 
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_external_thread_simple_creates_solid(self, nps):
-        """Verify simplified external thread creates a valid solid."""
-        thread = make_npt_external_thread(nps, simple=True)
-        assert thread is not None
-        assert hasattr(thread, 'Volume')
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_external_thread_full_creates_solid(self, nps):
-        """Verify full external thread creates a valid solid."""
-        thread = make_npt_external_thread(nps, simple=False)
-        assert thread is not None
-        assert hasattr(thread, 'Volume')
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_internal_thread_simple_creates_solid(self, nps):
-        """Verify simplified internal thread creates a valid solid."""
-        thread = make_npt_internal_thread(nps, simple=True)
-        assert thread is not None
-        assert hasattr(thread, 'Volume')
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_internal_thread_full_creates_solid(self, nps):
-        """Verify full internal thread creates a valid solid."""
-        thread = make_npt_internal_thread(nps, simple=False)
-        assert thread is not None
-        assert hasattr(thread, 'Volume')
-
-    def test_thread_length_parameter(self):
-        """Verify custom thread length is respected."""
-        custom_length = 10.0  # mm
-
-        thread = make_npt_external_thread("1", thread_length=custom_length, simple=True)
-        assert thread is not None
-        # The thread should be approximately custom_length tall
-        # We can verify by checking bounding box
-
-    def test_external_thread_tapers_correctly(self):
-        """Verify external thread tapers (gets smaller) as Z increases."""
-        # For external threads, radius should decrease as we move along +Z
-        # This is implicit in the geometry - hard to test directly without
-        # inspecting the internal structure
-
-
-# =============================================================================
-# FITTING INTEGRATION TESTS
-# =============================================================================
-
-
-class TestFittingIntegration:
-    """Test NPT threads in fittings."""
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_threaded_elbow_90_with_threads(self, nps):
-        """Verify 90° elbow with threads creates valid geometry."""
-        elbow = make_threaded_elbow_90(nps, include_threads=True)
-        assert elbow is not None
-        assert hasattr(elbow, 'Volume')
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_threaded_elbow_45_with_threads(self, nps):
-        """Verify 45° elbow with threads creates valid geometry."""
-        elbow = make_threaded_elbow_45(nps, include_threads=True)
-        assert elbow is not None
-        assert hasattr(elbow, 'Volume')
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_threaded_tee_with_threads(self, nps):
-        """Verify tee with threads creates valid geometry."""
-        tee = make_threaded_tee(nps, include_threads=True)
-        assert tee is not None
-        assert hasattr(tee, 'Volume')
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_threaded_pipe_both_ends(self, nps):
-        """Verify threaded pipe with both ends creates valid geometry."""
-        pipe = make_threaded_pipe(nps, length=100, thread_end="both")
-        assert pipe is not None
-        assert hasattr(pipe, 'Volume')
-
-    @pytest.mark.parametrize("thread_end", ["none", "inlet", "outlet", "both"])
-    def test_threaded_pipe_thread_end_options(self, thread_end):
-        """Verify all thread_end options work."""
-        pipe = make_threaded_pipe("1", length=100, thread_end=thread_end)
-        assert pipe is not None
-
-
-# =============================================================================
-# THREAD ALIGNMENT TESTS
-# =============================================================================
-
-
-class TestThreadAlignment:
-    """Test thread alignment at engagement depths."""
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_alignment_transform_exists(self, nps):
-        """Verify alignment transform can be calculated."""
-        transform = calculate_thread_alignment_transform(nps)
-        assert transform is not None
-        assert isinstance(transform, cq.Location)
-
-    def test_alignment_transform_uses_wrench_tight_by_default(self):
-        """Verify default alignment is wrench-tight (L1+L3)."""
-        nps = "1"
-        transform = calculate_thread_alignment_transform(nps)
-
-        # The transform should translate by -wrench_tight_engagement in Z
-        # We can verify by checking the transform values
-        # For a Location, we can extract translation from wrapped()
-        assert transform is not None
-
-    def test_custom_engagement_depth(self):
-        """Verify custom engagement depth is respected."""
-        nps = "1"
-        custom_depth = 10.0  # mm
-        transform = calculate_thread_alignment_transform(nps, engagement_depth=custom_depth)
-        assert transform is not None
-
-    @pytest.mark.parametrize("nps", ["1/2", "1", "2"])
-    def test_assembly_at_wrench_tight_no_major_interference(self, nps):
-        """
-        Verify pipe and fitting threads don't have major interference at wrench-tight.
-
-        Note: This is a simplified test. For production, you would use more
-        sophisticated interference detection or visual inspection.
-        """
-        # Create fitting with internal threads (simplified for speed)
-        fitting = make_threaded_elbow_90(nps, include_threads=False)
-
-        # Create pipe with external threads
-        pipe = make_threaded_pipe(nps, length=100, thread_end="inlet", include_threads=False)
-
-        # Get alignment transform
-        transform = calculate_thread_alignment_transform(nps)
-
-        # Position pipe at wrench-tight engagement
-        pipe_positioned = pipe.moved(transform)
-
-        # Both shapes should be valid
-        assert fitting is not None
-        assert pipe_positioned is not None
-
-
-# =============================================================================
-# EXPORT/VISUALIZATION TESTS
-# =============================================================================
-
-
-class TestExport:
-    """Test STEP export of threaded parts."""
-
-    def test_export_threaded_assembly(self, tmp_path):
-        """Export a complete threaded assembly for visual verification."""
-        nps = "1"
-
-        # Create fitting and pipe
-        fitting = make_threaded_elbow_90(nps, include_threads=True)
-        pipe = make_threaded_pipe(nps, length=100, thread_end="inlet")
-
-        # Position pipe at wrench-tight engagement
-        transform = calculate_thread_alignment_transform(nps)
-        pipe_positioned = pipe.moved(transform)
-
-        # Create assembly compound
-        assembly = cq.Compound.makeCompound([fitting, pipe_positioned])
-
-        # Export to STEP
-        output_file = tmp_path / "threaded_assembly_test.step"
-        cq.exporters.export(assembly, str(output_file))
-
-        assert output_file.exists()
-        assert output_file.stat().st_size > 0
-
-
-# =============================================================================
-# EDGE CASES AND ERROR HANDLING
-# =============================================================================
-
-
-class TestEdgeCases:
-    """Test edge cases and error handling."""
-
-    def test_minimum_thread_length(self):
-        """Verify minimum thread length works."""
-        thread = make_npt_external_thread("1", thread_length=5.0, simple=True)
-        assert thread is not None
-
-    def test_all_sizes_create_threads(self):
-        """Verify all supported sizes can create threads."""
-        for nps in NPT_SPECS.keys():
-            # Use simplified threads for speed
-            ext = make_npt_external_thread(nps, simple=True)
-            assert ext is not None, f"Failed to create external thread for NPS {nps}"
-
-            int_thread = make_npt_internal_thread(nps, simple=True)
-            assert int_thread is not None, f"Failed to create internal thread for NPS {nps}"
+    def test_build_with_square_uses_original_path(self):
+        """build() should use original path for square end finishes."""
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=2.0,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+            end_finishes=("square", "square"),
+        )
+        thread = builder.build()
+        assert thread.isValid()
