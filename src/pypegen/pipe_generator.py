@@ -6,6 +6,7 @@ parametrically, without relying on pre-made STEP files.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -309,6 +310,11 @@ def make_threaded_pipe(
     apex_start = r_outer - (thread_length * NPT_TAPER_RATIO / 2.0)
     root_start = apex_start - thread_depth
 
+    # Calculate thread radii at large end (Z=thread_length) following NPT taper
+    taper_delta = thread_length * math.tan(math.radians(NPT_HALF_ANGLE_DEG))
+    apex_end = apex_start + taper_delta  # Should equal r_outer
+    root_end = root_start + taper_delta
+
     # ADDITIVE APPROACH: Build pipe from sections and fuse them together
     # This avoids OCCT Boolean cut issues with transformed thread geometry
 
@@ -322,10 +328,10 @@ def make_threaded_pipe(
 
     # 1. Create inlet section (threaded or plain)
     if inlet_threaded:
-        # Thread core extends from root_start at free end to r_outer at pipe junction
-        # This ensures smooth transition to the plain pipe section
+        # Thread core follows NPT taper from root_start to root_end
+        # This ensures the core stays at the thread root level throughout
         inlet_core = _make_tapered_cylinder(
-            root_start, r_outer, thread_length  # Expand to pipe OD at junction
+            root_start, root_end, thread_length
         )
         inlet_bore = cq.Solid.makeCylinder(r_inner, thread_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
         inlet_core = extract_solid(inlet_core.cut(inlet_bore))
@@ -343,6 +349,20 @@ def make_threaded_pipe(
         )
 
         inlet_section = extract_solid(inlet_core.fuse(inlet_teeth))
+
+        # Add transition from thread root (root_end) to pipe OD (r_outer)
+        # This fills the gap between the threaded section and plain pipe
+        if root_end < r_outer:
+            inlet_transition = _make_tapered_cylinder(
+                root_end, r_outer, 0.1  # Very short transition
+            )
+            inlet_transition = inlet_transition.translate(cq.Vector(0, 0, thread_length - 0.05))
+            inlet_transition_bore = cq.Solid.makeCylinder(
+                r_inner, 0.2, cq.Vector(0, 0, thread_length - 0.1), cq.Vector(0, 0, 1)
+            )
+            inlet_transition = extract_solid(inlet_transition.cut(inlet_transition_bore))
+            inlet_section = extract_solid(inlet_section.fuse(inlet_transition))
+
         pipe = inlet_section
     else:
         # Plain inlet (if outlet-only threading)
@@ -368,9 +388,9 @@ def make_threaded_pipe(
 
     # 3. Create outlet section (threaded or plain)
     if outlet_threaded:
-        # Thread core extends from root_start at free end to r_outer at pipe junction
+        # Thread core follows NPT taper from root_start to root_end
         outlet_core = _make_tapered_cylinder(
-            root_start, r_outer, thread_length  # Expand to pipe OD at junction
+            root_start, root_end, thread_length
         )
         outlet_bore = cq.Solid.makeCylinder(r_inner, thread_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
         outlet_core = extract_solid(outlet_core.cut(outlet_bore))
@@ -388,6 +408,18 @@ def make_threaded_pipe(
         )
 
         outlet_section = extract_solid(outlet_core.fuse(outlet_teeth))
+
+        # Add transition from thread root (root_end) to pipe OD (r_outer)
+        if root_end < r_outer:
+            outlet_transition = _make_tapered_cylinder(
+                root_end, r_outer, 0.1
+            )
+            outlet_transition = outlet_transition.translate(cq.Vector(0, 0, thread_length - 0.05))
+            outlet_transition_bore = cq.Solid.makeCylinder(
+                r_inner, 0.2, cq.Vector(0, 0, thread_length - 0.1), cq.Vector(0, 0, 1)
+            )
+            outlet_transition = extract_solid(outlet_transition.cut(outlet_transition_bore))
+            outlet_section = extract_solid(outlet_section.fuse(outlet_transition))
 
         # Flip so free end (small diameter) is at Z=length
         outlet_section = outlet_section.rotate(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180)

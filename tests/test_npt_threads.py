@@ -258,11 +258,43 @@ class TestNPTSpecs:
         assert abs(spec.pitch_mm - expected_pitch) < 0.001
 
     def test_thread_depth_calculation(self):
-        """Thread depth should be 75% of sharp V height."""
+        """Thread depth should be 0.8 * pitch per ASME B1.20.1."""
         spec = get_npt_spec("1/2")
-        sharp_v_height = 0.866025 * spec.pitch_mm
-        expected_depth = 0.75 * sharp_v_height
+        expected_depth = 0.8 * spec.pitch_mm
         assert abs(spec.thread_depth - expected_depth) < 0.001
+
+    def test_truncation_calculation(self):
+        """Truncation should be 0.033 * pitch per ASME B1.20.1."""
+        spec = get_npt_spec("1/2")
+        expected_truncation = 0.033 * spec.pitch_mm
+        assert abs(spec.truncation - expected_truncation) < 0.001
+
+    def test_flat_width_calculation(self):
+        """Flat width should be ~0.038 * pitch per ASME B1.20.1."""
+        spec = get_npt_spec("1/2")
+        expected_flat = 0.038 * spec.pitch_mm
+        # Allow 5% tolerance due to tan(30°) calculation
+        assert abs(spec.flat_width - expected_flat) / expected_flat < 0.05
+
+    def test_thread_profile_widths(self):
+        """ThreadBuilder uses correct NPT profile widths for 30° flank angles."""
+        pitch = 2.0
+        builder = ThreadBuilder(
+            apex_radius=10.0,
+            root_radius=8.0,
+            pitch=pitch,
+            length=20.0,
+            taper_angle=NPT_HALF_ANGLE_DEG,
+            external=True,
+        )
+        # For NPT: apex_width ≈ 0.038P, root_width ≈ 0.962P
+        # These create correct 30° flank angles with 0.8P thread depth
+        thread_depth = 0.8 * pitch
+        flank_span = thread_depth * math.tan(math.radians(30))
+        expected_apex = (pitch - 2 * flank_span) / 2
+        expected_root = expected_apex + 2 * flank_span
+        assert abs(builder.apex_width - expected_apex) < 0.001
+        assert abs(builder.root_width - expected_root) < 0.001
 
 
 class TestBuildMethodRouting:

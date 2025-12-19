@@ -42,8 +42,9 @@ THREAD_ANGLE_DEG = 60.0
 
 # Thread form constants (per ASME B1.20.1)
 # H = height of sharp V thread = 0.866025 * pitch
-# Truncation = H/8 at both crest and root
-# Actual thread depth = H - 2*(H/8) = 0.75*H = 0.6495*pitch
+# h = thread height = 0.8 * pitch (truncated thread height)
+# f = truncation = 0.033 * pitch (minimum, radial from sharp V point to flat)
+# F = flat width = ~0.038 * pitch (at both crest and root, F = 2 * f * tan(30°))
 
 
 # =============================================================================
@@ -77,13 +78,23 @@ class NPTSpec:
 
     @property
     def thread_depth(self) -> float:
-        """Actual thread depth with truncation (mm)."""
-        return 0.75 * self.thread_height_sharp_v
+        """Actual thread depth per ASME B1.20.1: h = 0.8P."""
+        return 0.8 * self.pitch_mm
+
+    @property
+    def truncation(self) -> float:
+        """Radial truncation per ASME B1.20.1: f = 0.033P (minimum)."""
+        return 0.033 * self.pitch_mm
+
+    @property
+    def flat_width(self) -> float:
+        """Flat width at crest/root per ASME B1.20.1: F = 2 × f × tan(30°) ≈ 0.038P."""
+        return 2 * self.truncation * math.tan(math.radians(30))
 
     @property
     def crest_flat(self) -> float:
-        """Width of flat at thread crest/root (mm)."""
-        return self.thread_height_sharp_v / 8.0
+        """Width of flat at thread crest/root (mm). Alias for flat_width."""
+        return self.flat_width
 
     @property
     def wrench_tight_engagement(self) -> float:
@@ -274,13 +285,31 @@ class ThreadBuilder:
         self.right_hand = right_hand
         self.blend_radius = blend_radius
 
-        # Thread profile widths (per cq_warehouse formulas for 60° threads)
+        # Thread profile widths (helical wire offsets for ruled surface geometry)
+        # These define the Z-offset between paired helical wires that form
+        # the crest and root surfaces.
+        #
+        # For NPT threads per ASME B1.20.1:
+        # - Thread depth h = 0.8P
+        # - Flank angle = 30° (60° included angle)
+        # - Flank axial span = h × tan(30°) = 0.8P × 0.577 = 0.462P
+        # - Remaining for flats = P - 2×0.462P = 0.076P
+        # - Symmetric truncation: apex_flat = root_flat = 0.038P
+        #
+        # The apex_width is the crest flat width.
+        # The root_width spans from one flank edge across the root to the other flank.
+        # root_width = apex_width + 2×flank_span = 0.038P + 0.924P = 0.962P
+        thread_depth = 0.8 * pitch
+        flank_axial_span = thread_depth * math.tan(math.radians(30))  # 0.462P
+        flat_width = pitch - 2 * flank_axial_span  # 0.076P total for both flats
+
         if external:
-            self.apex_width = pitch / 8.0
-            self.root_width = 3.0 * pitch / 4.0
+            self.apex_width = flat_width / 2  # ~0.038P (crest flat)
+            self.root_width = self.apex_width + 2 * flank_axial_span  # ~0.962P
         else:
-            self.apex_width = pitch / 4.0
-            self.root_width = 7.0 * pitch / 8.0
+            # Internal threads: apex is at smaller radius, root at larger
+            self.apex_width = flat_width / 2  # ~0.038P
+            self.root_width = self.apex_width + 2 * flank_axial_span  # ~0.962P
 
         # Tooth height
         self.tooth_height = abs(apex_radius - root_radius)
