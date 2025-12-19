@@ -322,14 +322,15 @@ def make_threaded_pipe(
 
     # 1. Create inlet section (threaded or plain)
     if inlet_threaded:
-        # Thread core (tapered cylinder from root to expanding)
+        # Thread core extends from root_start at free end to r_outer at pipe junction
+        # This ensures smooth transition to the plain pipe section
         inlet_core = _make_tapered_cylinder(
-            root_start, root_start + thread_length * NPT_TAPER_RATIO / 2.0, thread_length
+            root_start, r_outer, thread_length  # Expand to pipe OD at junction
         )
         inlet_bore = cq.Solid.makeCylinder(r_inner, thread_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
         inlet_core = extract_solid(inlet_core.cut(inlet_bore))
 
-        # Thread teeth
+        # Thread teeth with pipe_junction fade at the pipe body end
         inlet_teeth = _make_thread_solid(
             apex_radius=apex_start,
             root_radius=root_start,
@@ -337,7 +338,8 @@ def make_threaded_pipe(
             length=thread_length,
             taper_angle=NPT_HALF_ANGLE_DEG,
             external=True,
-            end_finishes=("fade", "fade"),  # Use fade for proper thread runout
+            end_finishes=("fade", "pipe_junction"),  # fade at free end, blend at pipe junction
+            blend_radius=r_outer,  # blend to pipe OD at junction
         )
 
         inlet_section = extract_solid(inlet_core.fuse(inlet_teeth))
@@ -366,14 +368,14 @@ def make_threaded_pipe(
 
     # 3. Create outlet section (threaded or plain)
     if outlet_threaded:
-        # Thread core (tapered cylinder from root to expanding)
+        # Thread core extends from root_start at free end to r_outer at pipe junction
         outlet_core = _make_tapered_cylinder(
-            root_start, root_start + thread_length * NPT_TAPER_RATIO / 2.0, thread_length
+            root_start, r_outer, thread_length  # Expand to pipe OD at junction
         )
         outlet_bore = cq.Solid.makeCylinder(r_inner, thread_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
         outlet_core = extract_solid(outlet_core.cut(outlet_bore))
 
-        # Thread teeth
+        # Thread teeth with pipe_junction fade at the pipe body end
         outlet_teeth = _make_thread_solid(
             apex_radius=apex_start,
             root_radius=root_start,
@@ -381,7 +383,8 @@ def make_threaded_pipe(
             length=thread_length,
             taper_angle=NPT_HALF_ANGLE_DEG,
             external=True,
-            end_finishes=("fade", "fade"),  # Use fade for proper thread runout
+            end_finishes=("fade", "pipe_junction"),  # fade at free end, blend at pipe junction
+            blend_radius=r_outer,  # blend to pipe OD at junction
         )
 
         outlet_section = extract_solid(outlet_core.fuse(outlet_teeth))

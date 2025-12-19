@@ -249,8 +249,21 @@ class ThreadBuilder:
         external: bool = True,
         end_finishes: tuple[str, str] = ("fade", "fade"),
         right_hand: bool = True,
+        blend_radius: float | None = None,
     ):
-        """Initialize thread builder."""
+        """Initialize thread builder.
+
+        Args:
+            apex_radius: Radius at thread crest (tips)
+            root_radius: Radius at thread root (valleys)
+            pitch: Thread pitch (mm)
+            length: Thread length (mm)
+            taper_angle: Helix taper half-angle in degrees
+            external: True for external threads
+            end_finishes: Tuple of (start_finish, end_finish) - "fade", "pipe_junction", "raw", "square"
+            right_hand: True for right-hand threads
+            blend_radius: Target radius for "pipe_junction" fade (typically pipe OD)
+        """
         self.apex_radius = apex_radius
         self.root_radius = root_radius
         self.pitch = pitch
@@ -259,6 +272,7 @@ class ThreadBuilder:
         self.external = external
         self.end_finishes = end_finishes
         self.right_hand = right_hand
+        self.blend_radius = blend_radius
 
         # Thread profile widths (per cq_warehouse formulas for 60° threads)
         if external:
@@ -315,6 +329,69 @@ class ThreadBuilder:
             radius = apex_radius_at_z - fade_factor * tooth_height_at_z if apex else root_radius_at_z
         else:
             radius = apex_radius_at_z + fade_factor * tooth_height_at_z if apex else root_radius_at_z
+
+        x_pos = radius * math.cos(t * math.pi / 2)
+        y_pos = radius * math.sin(t * math.pi / 2)
+
+        return (x_pos, y_pos, z_local)
+
+    def pipe_junction_fade_helix(
+        self,
+        t: float,
+        apex: bool,
+        vertical_displacement: float,
+        z_offset: float = 0.0,
+    ) -> tuple[float, float, float]:
+        """Parametric fade for pipe junction where both apex and root converge to blend_radius.
+
+        Unlike regular fade_helix (where apex fades to root level), this fade:
+        - Apex fades DOWN from apex_radius to blend_radius (pipe OD)
+        - Root EXPANDS UP from root_radius to blend_radius (pipe OD)
+        - Both converge at blend_radius, eliminating the step at pipe junction
+
+        Args:
+            t: Parameter from 0 to 1 (0 = full thread, 1 = blended to pipe OD)
+            apex: True for apex wire, False for root wire
+            vertical_displacement: Additional Z displacement for root wires
+            z_offset: Starting Z position for radius taper calculation
+
+        Returns:
+            (x, y, z) coordinates
+        """
+        if self.blend_radius is None:
+            raise ValueError("blend_radius must be set for pipe_junction fade")
+
+        # Z position within this fade section
+        z_local = t * self.pitch / 4 + t * vertical_displacement
+        z_total = z_offset + z_local
+
+        # Calculate taper-adjusted radii at this Z position
+        taper_delta = z_total * math.tan(math.radians(self.taper)) if self.taper != 0 else 0.0
+
+        apex_radius_at_z = self.apex_radius + taper_delta
+        root_radius_at_z = self.root_radius_adjusted + taper_delta
+        blend_radius_at_z = self.blend_radius + taper_delta
+
+        # Apply fade interpolation (sine curve)
+        fade_factor = math.sin(t * math.pi / 2)
+
+        if apex:
+            # Apex fades from apex_radius toward blend_radius
+            if self.external:
+                # External: apex is larger, blend is even larger (pipe OD)
+                # apex → blend (upward for external threads)
+                radius = apex_radius_at_z + fade_factor * (blend_radius_at_z - apex_radius_at_z)
+            else:
+                # Internal: apex is smaller, blend is smaller (pipe ID)
+                radius = apex_radius_at_z - fade_factor * (apex_radius_at_z - blend_radius_at_z)
+        else:
+            # Root expands from root_radius toward blend_radius
+            if self.external:
+                # External: root is smaller than blend (pipe OD)
+                radius = root_radius_at_z + fade_factor * (blend_radius_at_z - root_radius_at_z)
+            else:
+                # Internal: root is larger, blend is smaller
+                radius = root_radius_at_z - fade_factor * (root_radius_at_z - blend_radius_at_z)
 
         x_pos = radius * math.cos(t * math.pi / 2)
         y_pos = radius * math.sin(t * math.pi / 2)
@@ -498,7 +575,9 @@ class ThreadBuilder:
         start_finish, end_finish = self.end_finishes
         fade_start = start_finish == "fade"
         fade_end = end_finish == "fade"
-        number_faded_ends = int(fade_start) + int(fade_end)
+        pipe_junction_end = end_finish == "pipe_junction"
+        # Count faded ends (both "fade" and "pipe_junction" count)
+        number_faded_ends = int(fade_start) + int(fade_end or pipe_junction_end)
 
         # Calculate cylindrical section length per cq_warehouse formula
         cylindrical_length = self.length + self.pitch * (1 - number_faded_ends)
@@ -574,6 +653,30 @@ class ThreadBuilder:
             y_pos = radius * math.sin(t * math.pi / 2)
             return (x_pos, y_pos, z_pos)
 
+        def pipe_junction_fade_simple(t: float, apex: bool, vertical_displacement: float) -> tuple[float, float, float]:
+            """Fade where both apex and root converge to blend_radius (pipe OD)."""
+            if self.blend_radius is None:
+                raise ValueError("blend_radius must be set for pipe_junction fade")
+
+            fade_factor = math.sin(t * math.pi / 2)
+            if apex:
+                # Apex transitions to blend_radius
+                if self.external:
+                    radius = self.apex_radius + fade_factor * (self.blend_radius - self.apex_radius)
+                else:
+                    radius = self.apex_radius - fade_factor * (self.apex_radius - self.blend_radius)
+            else:
+                # Root transitions to blend_radius
+                if self.external:
+                    radius = self.root_radius + fade_factor * (self.blend_radius - self.root_radius)
+                else:
+                    radius = self.root_radius - fade_factor * (self.root_radius - self.blend_radius)
+
+            z_pos = t * self.pitch / 4 + t * vertical_displacement
+            x_pos = radius * math.cos(t * math.pi / 2)
+            y_pos = radius * math.sin(t * math.pi / 2)
+            return (x_pos, y_pos, z_pos)
+
         # Create fade wires (same for both ends, then transformed differently)
         fade_apex_wires: list[cq.Wire] = []
         for i in [-0.5, 0.5]:
@@ -634,12 +737,61 @@ class ThreadBuilder:
             ]
             all_faces.extend(fade_faces_top)
 
+        if pipe_junction_end:
+            # Pipe junction fade: thread blends to pipe OD
+            # Create separate fade wires using pipe_junction_fade_simple
+            pj_apex_wires: list[cq.Wire] = []
+            for i in [-0.5, 0.5]:
+                i_val = i
+
+                def make_pj_apex(t: float, _i: float = i_val) -> tuple[float, float, float]:
+                    return pipe_junction_fade_simple(t, apex=True, vertical_displacement=0)
+
+                edge = cq.Workplane("XY").parametricCurve(make_pj_apex, N=20).val()
+                wire = cq.Wire.assembleEdges([edge]) if isinstance(edge, cq.Edge) else edge
+                wire = wire.translate(cq.Vector(0, 0, i_val * self.apex_width))
+                pj_apex_wires.append(wire)
+
+            pj_root_wires: list[cq.Wire] = []
+            for i in [-0.5, 0.5]:
+                i_val = i
+                vert_disp = -i_val * (self.root_width - self.apex_width)
+
+                def make_pj_root(t: float, vd: float = vert_disp) -> tuple[float, float, float]:
+                    return pipe_junction_fade_simple(t, apex=False, vertical_displacement=vd)
+
+                edge = cq.Workplane("XY").parametricCurve(make_pj_root, N=20).val()
+                wire = cq.Wire.assembleEdges([edge]) if isinstance(edge, cq.Edge) else edge
+                wire = wire.translate(cq.Vector(0, 0, i_val * self.root_width))
+                pj_root_wires.append(wire)
+
+            # Create 4 pipe junction fade faces
+            pj_fade_faces = [
+                cq.Face.makeRuledSurface(pj_apex_wires[0], pj_apex_wires[1]),
+                cq.Face.makeRuledSurface(pj_apex_wires[1], pj_root_wires[1]),
+                cq.Face.makeRuledSurface(pj_root_wires[1], pj_root_wires[0]),
+                cq.Face.makeRuledSurface(pj_root_wires[0], pj_apex_wires[0]),
+            ]
+
+            if not self.right_hand:
+                pj_fade_faces = [f.mirror("XZ") for f in pj_fade_faces]
+
+            # Transform: translate then rotate (same as fade_end but different faces)
+            top_z = cylindrical_length + cylindrical_displacement
+            pj_faces_top = [
+                f.translate(cq.Vector(0, 0, top_z)).rotate(
+                    cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), cylindrical_angle
+                )
+                for f in pj_fade_faces
+            ]
+            all_faces.extend(pj_faces_top)
+
         # Add end caps only for NON-faded ends
         if number_faded_ends == 2:
             pass  # No end caps when both ends faded
         elif fade_start:
             all_faces.append(end_faces[1])  # Top end cap only
-        else:
+        elif not (fade_end or pipe_junction_end):
             all_faces.append(end_faces[0])  # Bottom end cap only
 
         # === 4. Create shell and solid using BRepBuilderAPI_Sewing ===
@@ -904,6 +1056,7 @@ def _make_thread_solid(
     taper_angle: float = 0.0,
     external: bool = True,
     end_finishes: tuple[str, str] = ("fade", "fade"),
+    blend_radius: float | None = None,
 ) -> cq.Shape:
     """Create thread solid using ruled surfaces between helical wires.
 
@@ -923,8 +1076,10 @@ def _make_thread_solid(
         end_finishes: Tuple of (start_finish, end_finish) where each is:
             - "raw": Unfinished thread extending beyond boundaries
             - "fade": Thread profile fades to zero over 90° arc
+            - "pipe_junction": Thread blends to blend_radius (pipe OD)
             - "square": Clean cut at thread boundary
             - "chamfer": Conical chamfer at thread ends
+        blend_radius: Target radius for "pipe_junction" fade (typically pipe OD)
 
     Returns:
         Thread solid as CadQuery Shape
@@ -938,6 +1093,7 @@ def _make_thread_solid(
             taper_angle=taper_angle,
             external=external,
             end_finishes=end_finishes,
+            blend_radius=blend_radius,
         )
         return builder.build()
 
