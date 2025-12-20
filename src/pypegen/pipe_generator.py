@@ -258,6 +258,7 @@ def make_threaded_pipe(
     from .fittings.npt_thread import (
         NPT_HALF_ANGLE_DEG,
         NPT_TAPER_RATIO,
+        _make_external_thread_core,
         _make_tapered_cylinder,
         _make_thread_solid,
     )
@@ -310,33 +311,48 @@ def make_threaded_pipe(
     apex_start = r_outer - (thread_length * NPT_TAPER_RATIO / 2.0)
     root_start = apex_start - thread_depth
 
-    # Calculate thread radii at large end (Z=thread_length) following NPT taper
-    taper_delta = thread_length * math.tan(math.radians(NPT_HALF_ANGLE_DEG))
-    apex_end = apex_start + taper_delta  # Should equal r_outer
-    root_end = root_start + taper_delta
+    # Note: At the large end (Z=thread_length), the thread radii follow NPT taper:
+    # apex_end = apex_start + taper_delta ≈ r_outer (thread crests meet pipe OD)
+    # root_end = root_start + taper_delta (thread valleys are below pipe OD)
+    # The pipe_junction fade blends both apex and root to r_outer at the pipe junction.
 
     # ADDITIVE APPROACH: Build pipe from sections and fuse them together
     # This avoids OCCT Boolean cut issues with transformed thread geometry
 
     # Calculate section positions
-    inlet_length = thread_length if inlet_threaded else 0
-    outlet_length = thread_length if outlet_threaded else 0
-    middle_start = inlet_length
-    middle_length = length - inlet_length - outlet_length
+    # No separate transition needed - pipe_junction end finish blends threads to pipe OD
+    inlet_extent = thread_length if inlet_threaded else 0
+    outlet_extent = thread_length if outlet_threaded else 0
+    middle_start = inlet_extent
+    middle_length = length - inlet_extent - outlet_extent
 
     pipe = None
 
     # 1. Create inlet section (threaded or plain)
     if inlet_threaded:
-        # Thread core follows NPT taper from root_start to root_end
-        # This ensures the core stays at the thread root level throughout
-        inlet_core = _make_tapered_cylinder(
-            root_start, root_end, thread_length
-        )
-        inlet_bore = cq.Solid.makeCylinder(r_inner, thread_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
-        inlet_core = extract_solid(inlet_core.cut(inlet_bore))
+        # ADDITIVE APPROACH with pipe_junction blend:
+        # - Core tapers from root_start to r_outer to match where pipe_junction ends
+        # - Thread teeth follow NPT taper with pipe_junction at pipe end
+        # - pipe_junction fade blends both apex and root to r_outer (pipe OD)
 
-        # Thread teeth with pipe_junction fade at the pipe body end
+        # Threaded core: tapers from root_start to r_outer
+        # This matches the pipe_junction fade which brings root to r_outer
+        root_large = root_start + (thread_length * NPT_TAPER_RATIO / 2.0)
+        inlet_core = _make_external_thread_core(
+            root_radius_small=root_start,
+            root_radius_large=root_large,
+            thread_length=thread_length,
+            pitch=pitch,
+            bore_radius=r_inner,
+            end_finish="pipe_junction",
+            blend_radius=r_outer,
+            runout_turns=0.25,
+        )
+        inlet_core_solid = extract_solid(inlet_core)
+        if inlet_core_solid is None:
+            raise ValueError("Failed to create inlet core")
+
+        # Thread teeth with NPT taper and pipe_junction blend at pipe end
         inlet_teeth = _make_thread_solid(
             apex_radius=apex_start,
             root_radius=root_start,
@@ -344,31 +360,19 @@ def make_threaded_pipe(
             length=thread_length,
             taper_angle=NPT_HALF_ANGLE_DEG,
             external=True,
-            end_finishes=("fade", "pipe_junction"),  # fade at free end, blend at pipe junction
-            blend_radius=r_outer,  # blend to pipe OD at junction
+            end_finishes=("fade", "pipe_junction"),
+            blend_radius=r_outer,
         )
 
-        inlet_section = extract_solid(inlet_core.fuse(inlet_teeth))
-
-        # Add transition from thread root (root_end) to pipe OD (r_outer)
-        # This fills the gap between the threaded section and plain pipe
-        if root_end < r_outer:
-            inlet_transition = _make_tapered_cylinder(
-                root_end, r_outer, 0.1  # Very short transition
-            )
-            inlet_transition = inlet_transition.translate(cq.Vector(0, 0, thread_length - 0.05))
-            inlet_transition_bore = cq.Solid.makeCylinder(
-                r_inner, 0.2, cq.Vector(0, 0, thread_length - 0.1), cq.Vector(0, 0, 1)
-            )
-            inlet_transition = extract_solid(inlet_transition.cut(inlet_transition_bore))
-            inlet_section = extract_solid(inlet_section.fuse(inlet_transition))
-
+        inlet_section = extract_solid(inlet_core_solid.fuse(inlet_teeth))
+        if inlet_section is None:
+            raise ValueError("Failed to fuse inlet core and teeth")
         pipe = inlet_section
     else:
         # Plain inlet (if outlet-only threading)
-        if inlet_length > 0:
-            inlet_cyl = cq.Solid.makeCylinder(r_outer, inlet_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
-            inlet_bore = cq.Solid.makeCylinder(r_inner, inlet_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+        if inlet_extent > 0:
+            inlet_cyl = cq.Solid.makeCylinder(r_outer, inlet_extent, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+            inlet_bore = cq.Solid.makeCylinder(r_inner, inlet_extent, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
             pipe = extract_solid(inlet_cyl.cut(inlet_bore))
 
     # 2. Create middle section (plain cylinder)
@@ -380,22 +384,41 @@ def make_threaded_pipe(
             r_inner, middle_length, cq.Vector(0, 0, middle_start), cq.Vector(0, 0, 1)
         )
         middle_section = extract_solid(middle_cyl.cut(middle_bore))
+        if middle_section is None:
+            raise ValueError("Failed to create middle section")
 
         if pipe is None:
             pipe = middle_section
         else:
-            pipe = extract_solid(pipe.fuse(middle_section))
+            fused = pipe.fuse(middle_section)
+            pipe = extract_solid(fused)
+            if pipe is None:
+                raise ValueError("Failed to fuse middle section")
 
     # 3. Create outlet section (threaded or plain)
     if outlet_threaded:
-        # Thread core follows NPT taper from root_start to root_end
-        outlet_core = _make_tapered_cylinder(
-            root_start, root_end, thread_length
-        )
-        outlet_bore = cq.Solid.makeCylinder(r_inner, thread_length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
-        outlet_core = extract_solid(outlet_core.cut(outlet_bore))
+        # ADDITIVE APPROACH with pipe_junction blend (same as inlet):
+        # - Core tapers from root_start to r_outer to match where pipe_junction ends
+        # - Thread teeth follow NPT taper with pipe_junction at pipe end
+        # - pipe_junction fade blends both apex and root to r_outer (pipe OD)
 
-        # Thread teeth with pipe_junction fade at the pipe body end
+        # Threaded core: tapers from root_start to r_outer
+        root_large = root_start + (thread_length * NPT_TAPER_RATIO / 2.0)
+        outlet_core = _make_external_thread_core(
+            root_radius_small=root_start,
+            root_radius_large=root_large,
+            thread_length=thread_length,
+            pitch=pitch,
+            bore_radius=r_inner,
+            end_finish="pipe_junction",
+            blend_radius=r_outer,
+            runout_turns=0.25,
+        )
+        outlet_core_solid = extract_solid(outlet_core)
+        if outlet_core_solid is None:
+            raise ValueError("Failed to create outlet core")
+
+        # Thread teeth with NPT taper and pipe_junction blend at pipe end
         outlet_teeth = _make_thread_solid(
             apex_radius=apex_start,
             root_radius=root_start,
@@ -403,23 +426,13 @@ def make_threaded_pipe(
             length=thread_length,
             taper_angle=NPT_HALF_ANGLE_DEG,
             external=True,
-            end_finishes=("fade", "pipe_junction"),  # fade at free end, blend at pipe junction
-            blend_radius=r_outer,  # blend to pipe OD at junction
+            end_finishes=("fade", "pipe_junction"),
+            blend_radius=r_outer,
         )
 
-        outlet_section = extract_solid(outlet_core.fuse(outlet_teeth))
-
-        # Add transition from thread root (root_end) to pipe OD (r_outer)
-        if root_end < r_outer:
-            outlet_transition = _make_tapered_cylinder(
-                root_end, r_outer, 0.1
-            )
-            outlet_transition = outlet_transition.translate(cq.Vector(0, 0, thread_length - 0.05))
-            outlet_transition_bore = cq.Solid.makeCylinder(
-                r_inner, 0.2, cq.Vector(0, 0, thread_length - 0.1), cq.Vector(0, 0, 1)
-            )
-            outlet_transition = extract_solid(outlet_transition.cut(outlet_transition_bore))
-            outlet_section = extract_solid(outlet_section.fuse(outlet_transition))
+        outlet_section = extract_solid(outlet_core_solid.fuse(outlet_teeth))
+        if outlet_section is None:
+            raise ValueError("Failed to fuse outlet core and teeth")
 
         # Flip so free end (small diameter) is at Z=length
         outlet_section = outlet_section.rotate(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180)
@@ -428,7 +441,13 @@ def make_threaded_pipe(
         if pipe is None:
             pipe = outlet_section
         else:
-            pipe = extract_solid(pipe.fuse(outlet_section))
+            fused = pipe.fuse(outlet_section)
+            pipe = extract_solid(fused)
+            if pipe is None:
+                raise ValueError("Failed to fuse pipe sections")
+
+    if pipe is None:
+        raise ValueError("Failed to create pipe")
 
     return pipe
 

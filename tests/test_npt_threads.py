@@ -207,6 +207,12 @@ class TestNPTExternalThread:
         assert thread.isValid()
         assert thread.Volume() > 0
 
+    def test_external_thread_pipe_junction_is_valid(self):
+        """Pipe junction fade should produce a valid external thread."""
+        thread = make_npt_external_thread("1/2", end_finishes=("fade", "pipe_junction"))
+        assert thread.isValid()
+        assert thread.Volume() > 0
+
     def test_external_thread_simple_mode(self):
         """Simple mode should return simplified geometry."""
         thread = make_npt_external_thread("1/2", simple=True)
