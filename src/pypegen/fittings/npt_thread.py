@@ -565,44 +565,136 @@ def make_npt_runout_cutter(
     return None
 
 
-def make_pipe_end_chamfer(
+def make_pipe_end_chamfer_cutter(
     major_radius: float,
-    thread_depth: float,
+    chamfer_size: float,
     chamfer_angle: float = 30.0,
 ) -> cq.Solid:
-    """Create 30° chamfer at pipe free end for thread entry.
+    """Create a cutter for external chamfer at pipe free end.
 
-    The chamfer removes material at the pipe tip to:
-    1. Allow easy thread engagement
-    2. Remove the sharp thread crest at the entry
-    3. Match standard manufacturing practice
+    Creates a conical cutter that bevels the outer corner of the pipe end.
+    The chamfer faces OUTWARD (visible when looking at pipe end from outside).
+
+    For NPT threads, the chamfer angle should be 30° (matching thread flank angle).
 
     Args:
         major_radius: Major thread radius at Z=0 (pipe free end)
-        thread_depth: Thread depth (determines chamfer depth)
-        chamfer_angle: Angle from horizontal (default 30° for 60° thread)
+        chamfer_size: Size of chamfer in mm (radial depth into pipe)
+        chamfer_angle: Angle from pipe axis (default 30° for NPT)
 
     Returns:
-        Solid representing material to remove for chamfer
+        Solid to subtract from pipe to create external chamfer
     """
-    # Chamfer depth is approximately the thread depth
-    chamfer_depth = thread_depth * 1.2  # Slightly deeper than thread
+    # Calculate chamfer axial depth based on angle
+    # For 30° chamfer: axial_depth = chamfer_size / tan(30°) ≈ 1.73 * chamfer_size
+    chamfer_axial = chamfer_size / math.tan(math.radians(chamfer_angle))
 
-    # Chamfer height based on angle
-    chamfer_height = chamfer_depth / math.tan(math.radians(chamfer_angle))
+    # The chamfer cutter is a cone that:
+    # - At Z=0: has radius = major_radius + margin (beyond pipe surface)
+    # - At Z=chamfer_axial: has radius = major_radius - chamfer_size (cuts into pipe)
+    # This creates an outward-facing bevel at the pipe end
 
-    # The chamfer is the volume between:
-    # - A cone from major_radius at Z=0 to (major_radius - chamfer_depth) at Z=chamfer_height
-    # - Extended below Z=0 to fully cut the edge
-    chamfer = cq.Solid.makeCone(
-        radius1=major_radius,
-        radius2=major_radius - chamfer_depth,
-        height=chamfer_height,
+    outer_radius = major_radius + 2.0  # Well beyond pipe surface
+    inner_radius = major_radius - chamfer_size
+
+    # Create the chamfer cone starting at Z=0
+    # Large radius at Z=0, small radius at Z=chamfer_axial
+    chamfer_cone = cq.Solid.makeCone(
+        radius1=outer_radius,
+        radius2=inner_radius,
+        height=chamfer_axial,
         pnt=cq.Vector(0, 0, 0),
         dir=cq.Vector(0, 0, 1),
     )
 
-    return chamfer
+    return chamfer_cone
+
+
+def apply_pipe_end_chamfer(
+    pipe_blank: cq.Shape,
+    radial_depth: float,
+    axial_depth: float,
+) -> cq.Shape:
+    """Apply external chamfer to pipe free end on OD edge only.
+
+    Uses direct OCCT API to apply asymmetric chamfer to only the outer edge
+    at Z=0, leaving the inner edge (bore) unchanged.
+
+    This should be called BEFORE cutting threads, as chamfer works
+    reliably on simple geometry but can fail on complex threaded surfaces.
+
+    Args:
+        pipe_blank: The tapered pipe section (before threads are cut)
+        radial_depth: Chamfer depth radially into pipe wall (mm)
+        axial_depth: Chamfer depth axially into pipe (mm)
+
+    Returns:
+        Pipe with chamfered entry edge at Z=0 (OD only)
+    """
+    from OCP.BRepFilletAPI import BRepFilletAPI_MakeChamfer
+    from OCP.TopExp import TopExp_Explorer, TopExp
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    try:
+        solid = pipe_blank.wrapped if hasattr(pipe_blank, 'wrapped') else pipe_blank
+
+        # Build edge-to-face map
+        edge_face_map = TopTools_IndexedDataMapOfShapeListOfShape()
+        TopExp.MapShapesAndAncestors_s(solid, TopAbs_EDGE, TopAbs_FACE, edge_face_map)
+
+        # Find the OD edge at Z=0 and its adjacent outer face
+        od_edge = None
+        outer_face = None
+
+        explorer = TopExp_Explorer(solid, TopAbs_EDGE)
+        while explorer.More():
+            edge = TopoDS.Edge_s(explorer.Current())
+            edge_shape = cq.Edge(edge)
+            start = edge_shape.startPoint()
+            end = edge_shape.endPoint()
+
+            # Check if edge is at Z=0 (circular edge on bottom face)
+            if abs(start.z) < 0.01 and abs(end.z) < 0.01:
+                edge_radius = math.sqrt(start.x**2 + start.y**2)
+                # OD edge has larger radius than ID edge
+                if edge_radius > 14.0:  # Threshold to distinguish OD from ID
+                    # Get adjacent faces
+                    adjacent_faces = edge_face_map.FindFromKey(edge)
+                    if not adjacent_faces.IsEmpty():
+                        f1 = TopoDS.Face_s(adjacent_faces.First())
+                        fc1 = cq.Face(f1).Center()
+                        f2 = TopoDS.Face_s(adjacent_faces.Last())
+                        fc2 = cq.Face(f2).Center()
+
+                        # Outer face is the conical surface (center not at Z=0)
+                        if abs(fc1.z) > 0.1:
+                            outer_face = f1
+                        elif abs(fc2.z) > 0.1:
+                            outer_face = f2
+
+                        if outer_face is not None:
+                            od_edge = edge
+                            break
+
+            explorer.Next()
+
+        if od_edge is None or outer_face is None:
+            return pipe_blank
+
+        # Apply asymmetric chamfer to OD edge only
+        chamfer_maker = BRepFilletAPI_MakeChamfer(solid)
+        chamfer_maker.Add(axial_depth, radial_depth, od_edge, outer_face)
+        chamfer_maker.Build()
+
+        if chamfer_maker.IsDone():
+            return cq.Shape(chamfer_maker.Shape())
+        else:
+            return pipe_blank
+
+    except Exception:
+        return pipe_blank
 
 
 # =============================================================================
@@ -662,6 +754,14 @@ def make_npt_external_thread(
     # Step 1: Create blank tapered pipe end
     pipe_blank = make_tapered_pipe_end(nps, thread_length, pipe_id)
 
+    # Step 1b: Apply entry chamfer BEFORE cutting threads
+    # Chamfer: 30° from vertical (pipe axis), full thread depth radially
+    if free_end_finish == "chamfer":
+        radial_depth = thread_depth  # Full thread depth
+        # For 30° from vertical: axial = radial * tan(30°)
+        axial_depth = radial_depth * math.tan(math.radians(30))
+        pipe_blank = apply_pipe_end_chamfer(pipe_blank, radial_depth, axial_depth)
+
     # Step 2: Determine main cutter length (reserve space for runout if needed)
     runout_length = pitch * runout_turns if junction_end_finish == "fade" else 0
     main_cutter_length = thread_length - runout_length
@@ -693,23 +793,12 @@ def make_npt_external_thread(
                 # Keep just the main cutter if fuse fails
                 pass
 
-    # Step 5: Cut threads from pipe blank
+    # Step 5: Cut threads from pipe blank (chamfer already applied in Step 1b)
     try:
         threaded_pipe = pipe_blank.cut(full_cutter)
     except Exception as e:
         print(f"Warning: Thread cutting failed: {e}, returning simplified geometry")
         return make_tapered_pipe_end(nps, thread_length, pipe_id)
-
-    # Step 6: Add entry chamfer if requested
-    if free_end_finish == "chamfer":
-        taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
-        major_radius_at_free_end = spec.od / 2.0 - taper_delta
-        chamfer = make_pipe_end_chamfer(major_radius_at_free_end, thread_depth)
-        try:
-            threaded_pipe = threaded_pipe.cut(chamfer)
-        except Exception:
-            # Skip chamfer if cut fails
-            pass
 
     # Validate result
     if not threaded_pipe.isValid():
