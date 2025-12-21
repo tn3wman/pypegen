@@ -314,12 +314,7 @@ def make_npt_thread_profile(
     ]
 
     # Create the profile in YZ plane, positioned at the radius
-    profile = (
-        cq.Workplane("YZ")
-        .transformed(offset=(at_radius, 0, 0))
-        .polyline(points)
-        .close()
-    )
+    profile = cq.Workplane("YZ").transformed(offset=(at_radius, 0, 0)).polyline(points).close()
 
     return profile
 
@@ -410,11 +405,9 @@ def make_npt_thread_cutter(
     # Each cross-section is a V-groove profile at a specific angle around the helix
     num_sections = max(int(num_turns * 36), 36)  # At least 36 sections, ~10° apart
 
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
-    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
-    from OCP.gp import gp_Pnt, gp_Vec, gp_Ax2, gp_Dir
-    from OCP.GC import GC_MakeArcOfCircle
     from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+    from OCP.gp import gp_Pnt
 
     loft = BRepOffsetAPI_ThruSections(True, False)  # solid=True, ruled=False
 
@@ -505,9 +498,9 @@ def make_npt_runout_cutter(
     start_angle = main_thread_turns * 2 * math.pi
 
     try:
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
         from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
         from OCP.gp import gp_Pnt
-        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
 
         num_sections = max(int(runout_turns * 36), 12)
         loft = BRepOffsetAPI_ThruSections(True, False)
@@ -565,6 +558,114 @@ def make_npt_runout_cutter(
     return None
 
 
+def make_npt_internal_thread_cutter(
+    nps: str,
+    thread_length: float,
+) -> cq.Shape:
+    """Create helical V-groove cutting tool for internal NPT threads.
+
+    The cutter is positioned INSIDE the bore and cuts OUTWARD into the
+    fitting wall. This mirrors the external thread cutter approach.
+
+    When subtracted from a fitting with a tapered bore, this cutter
+    creates proper internal NPT threads CUT into the wall.
+
+    V-groove geometry:
+    - WIDE at bore surface (minor_r) - where groove enters wall
+    - NARROW at thread root (major_r) - deepest into wall
+
+    Orientation:
+    - Axis along +Z
+    - Z=0 is the fitting face (SMALLEST diameter)
+    - Z=thread_length is into the fitting body (LARGEST diameter)
+    - NPT taper: radius INCREASES with Z
+
+    Args:
+        nps: Nominal pipe size
+        thread_length: Length of threaded section in mm
+
+    Returns:
+        Solid representing the cutting tool to SUBTRACT from fitting
+    """
+    spec = get_npt_spec(nps)
+    pitch = spec.pitch_mm
+    thread_depth = spec.thread_depth
+
+    # For internal threads at Z=0 (fitting face - SMALLEST diameter)
+    # minor_r = bore surface (where external pipe crests contact)
+    # major_r = minor_r + thread_depth (thread roots - deepest into wall)
+    minor_radius_at_start = spec.od / 2.0
+
+    # Thread profile dimensions (per ASME B1.20.1)
+    flat_width = 0.038 * pitch  # Flat at crest/root
+    half_flat = flat_width / 2
+    flank_axial_span = thread_depth * math.tan(math.radians(30))  # 60° included angle
+
+    # Calculate number of thread turns
+    num_turns = thread_length / pitch
+
+    # Create thread groove solid by lofting cross-sections
+    num_sections = max(int(num_turns * 36), 36)  # At least 36 sections
+
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+    from OCP.gp import gp_Pnt
+
+    loft = BRepOffsetAPI_ThruSections(True, False)  # solid=True, ruled=False
+
+    for i in range(num_sections + 1):
+        t = i / num_sections
+        z = t * thread_length
+        angle = t * num_turns * 2 * math.pi  # Angle around helix
+
+        # Radius at this Z position (NPT taper - increases with Z for internal)
+        taper_offset = z * NPT_TAPER_RATIO / 2.0
+        minor_r = minor_radius_at_start + taper_offset  # Bore surface
+        major_r = minor_r + thread_depth  # Thread root (into wall)
+
+        # Extend cutter slightly inside bore for clean cuts
+        inner_r = minor_r - 0.3
+
+        # Profile center position (in XY plane at angle)
+        cx = math.cos(angle)
+        cy = math.sin(angle)
+
+        # Create V-groove profile points (4 corners of trapezoid)
+        # For INTERNAL threads cutting OUTWARD:
+        # - WIDE span at inner_r (bore surface, where groove enters wall)
+        # - NARROW span at major_r (thread root, deepest into wall)
+
+        # Inner edge (at bore surface) - WIDE span
+        z_inner_top = z - half_flat - flank_axial_span
+        z_inner_bot = z + half_flat + flank_axial_span
+
+        # Outer edge (at thread root) - NARROW span (just the flat)
+        z_outer_top = z - half_flat
+        z_outer_bot = z + half_flat
+
+        pts = [
+            gp_Pnt(cx * inner_r, cy * inner_r, z_inner_top),  # Inner top (wide)
+            gp_Pnt(cx * inner_r, cy * inner_r, z_inner_bot),  # Inner bot (wide)
+            gp_Pnt(cx * major_r, cy * major_r, z_outer_bot),  # Outer bot (narrow)
+            gp_Pnt(cx * major_r, cy * major_r, z_outer_top),  # Outer top (narrow)
+        ]
+
+        # Build wire from points
+        wire_builder = BRepBuilderAPI_MakeWire()
+        for j in range(4):
+            edge = BRepBuilderAPI_MakeEdge(pts[j], pts[(j + 1) % 4]).Edge()
+            wire_builder.Add(edge)
+
+        wire = wire_builder.Wire()
+        loft.AddWire(wire)
+
+    loft.Build()
+    if not loft.IsDone():
+        raise ValueError("Failed to create internal thread cutter loft")
+
+    return cq.Shape(loft.Shape())
+
+
 def make_pipe_end_chamfer_cutter(
     major_radius: float,
     chamfer_size: float,
@@ -610,6 +711,76 @@ def make_pipe_end_chamfer_cutter(
     return chamfer_cone
 
 
+def apply_bore_chamfer(
+    bore_blank: cq.Shape,
+    radial_depth: float,
+    axial_depth: float,
+) -> cq.Shape:
+    """Apply internal chamfer to bore opening by fusing a flared cone.
+
+    Creates a cone that flares OUTWARD at Z=0 and fuses it with the bore,
+    effectively enlarging the bore entry to create a funnel-like guide for
+    pipe insertion.
+
+    This is different from the external pipe chamfer (which uses OCCT's
+    BRepFilletAPI_MakeChamfer to cut into the pipe). For internal bore
+    chamfer, we need to ADD material to the bore volume (enlarge it),
+    so we fuse a cone instead.
+
+    This should be called BEFORE adding thread ridges, as the simple cone
+    geometry fuses cleanly with the tapered bore.
+
+    Args:
+        bore_blank: The tapered bore cylinder (before thread ridges are added)
+        radial_depth: Chamfer depth radially outward from bore (mm)
+        axial_depth: Chamfer depth axially into bore (mm)
+
+    Returns:
+        Bore with flared entry at Z=0 (larger radius at opening)
+    """
+    try:
+        # Find the radius at Z=0 by examining the geometry vertices
+        from OCP.TopAbs import TopAbs_VERTEX
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopoDS import TopoDS
+
+        solid = bore_blank.wrapped if hasattr(bore_blank, "wrapped") else bore_blank
+        min_radius_at_z0 = float("inf")
+
+        explorer = TopExp_Explorer(solid, TopAbs_VERTEX)
+        while explorer.More():
+            vertex = TopoDS.Vertex_s(explorer.Current())
+            v = cq.Vertex(vertex)
+            pnt = v.toTuple()
+            if abs(pnt[2]) < 0.01:  # At Z=0
+                r = math.sqrt(pnt[0] ** 2 + pnt[1] ** 2)
+                min_radius_at_z0 = min(min_radius_at_z0, r)
+            explorer.Next()
+
+        if min_radius_at_z0 == float("inf"):
+            # Fallback: estimate from bounding box
+            bb = bore_blank.BoundingBox()
+            min_radius_at_z0 = min(abs(bb.xmin), abs(bb.xmax))
+
+        # Create chamfer cone - LARGER radius at Z=0 (flared), normal at Z=axial_depth
+        chamfer_radius_at_z0 = min_radius_at_z0 + radial_depth
+        chamfer_radius_at_end = min_radius_at_z0
+
+        chamfer_cone = cq.Solid.makeCone(
+            radius1=chamfer_radius_at_z0,  # Large at Z=0 (flared opening)
+            radius2=chamfer_radius_at_end,  # Normal bore radius at Z=axial_depth
+            height=axial_depth,
+            pnt=cq.Vector(0, 0, 0),
+            dir=cq.Vector(0, 0, 1),
+        )
+
+        # Fuse the chamfer cone with the bore
+        return bore_blank.fuse(chamfer_cone)
+
+    except Exception:
+        return bore_blank
+
+
 def apply_pipe_end_chamfer(
     pipe_blank: cq.Shape,
     radial_depth: float,
@@ -632,13 +803,13 @@ def apply_pipe_end_chamfer(
         Pipe with chamfered entry edge at Z=0 (OD only)
     """
     from OCP.BRepFilletAPI import BRepFilletAPI_MakeChamfer
-    from OCP.TopExp import TopExp_Explorer, TopExp
     from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
+    from OCP.TopExp import TopExp, TopExp_Explorer
     from OCP.TopoDS import TopoDS
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 
     try:
-        solid = pipe_blank.wrapped if hasattr(pipe_blank, 'wrapped') else pipe_blank
+        solid = pipe_blank.wrapped if hasattr(pipe_blank, "wrapped") else pipe_blank
 
         # Build edge-to-face map
         edge_face_map = TopTools_IndexedDataMapOfShapeListOfShape()
@@ -695,6 +866,131 @@ def apply_pipe_end_chamfer(
 
     except Exception:
         return pipe_blank
+
+
+def apply_bore_id_chamfer(
+    fitting: cq.Shape,
+    bore_axis: tuple[float, float, float],
+    bore_opening: tuple[float, float, float],
+    radial_depth: float,
+    axial_depth: float,
+) -> cq.Shape:
+    """Apply chamfer to ID edge of bore using BRepFilletAPI_MakeChamfer.
+
+    Creates a flared entry at the bore opening (chamfer turns outward).
+    Uses the same OCCT chamfer API as apply_pipe_end_chamfer.
+
+    Args:
+        fitting: The fitting solid with a bored hole
+        bore_axis: Unit vector along bore axis pointing INTO the fitting
+        bore_opening: 3D point at the center of the bore opening face
+        radial_depth: Chamfer depth radially into wall (mm)
+        axial_depth: Chamfer depth axially into fitting (mm)
+
+    Returns:
+        Fitting with chamfered bore entry edge
+    """
+    from OCP.BRepFilletAPI import BRepFilletAPI_MakeChamfer
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
+    from OCP.TopExp import TopExp, TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    try:
+        solid = fitting.wrapped if hasattr(fitting, "wrapped") else fitting
+
+        # Build edge-to-face map
+        edge_face_map = TopTools_IndexedDataMapOfShapeListOfShape()
+        TopExp.MapShapesAndAncestors_s(solid, TopAbs_EDGE, TopAbs_FACE, edge_face_map)
+
+        opening_x, opening_y, opening_z = bore_opening
+        ax, ay, az = bore_axis
+
+        # Find all circular edges at the bore opening plane
+        # We want the ID edge (smaller radius), not the OD edge
+        best_edge = None
+        best_face = None
+        best_radius = float("inf")
+
+        explorer = TopExp_Explorer(solid, TopAbs_EDGE)
+        while explorer.More():
+            edge = TopoDS.Edge_s(explorer.Current())
+            edge_shape = cq.Edge(edge)
+            start = edge_shape.startPoint()
+            end = edge_shape.endPoint()
+
+            # Vector from opening center to start point
+            dx = start.x - opening_x
+            dy = start.y - opening_y
+            dz = start.z - opening_z
+
+            # Distance along bore axis
+            dist_along = dx * ax + dy * ay + dz * az
+
+            # Check if edge is at opening plane (dist_along ~ 0)
+            if abs(dist_along) < 0.5:
+                # Calculate perpendicular distance (radius from bore axis)
+                # Remove the component along axis to get perpendicular vector
+                perp_x = dx - dist_along * ax
+                perp_y = dy - dist_along * ay
+                perp_z = dz - dist_along * az
+                radius = math.sqrt(perp_x**2 + perp_y**2 + perp_z**2)
+
+                # Check end point too - both should have same radius for circular edge
+                dx_e = end.x - opening_x
+                dy_e = end.y - opening_y
+                dz_e = end.z - opening_z
+                dist_along_e = dx_e * ax + dy_e * ay + dz_e * az
+                perp_x_e = dx_e - dist_along_e * ax
+                perp_y_e = dy_e - dist_along_e * ay
+                perp_z_e = dz_e - dist_along_e * az
+                radius_e = math.sqrt(perp_x_e**2 + perp_y_e**2 + perp_z_e**2)
+
+                # Circular edge: both endpoints at same radius
+                if abs(radius - radius_e) < 0.5 and radius > 5.0:
+                    # We want the smallest radius (ID edge, not OD edge)
+                    if radius < best_radius:
+                        # Get adjacent faces
+                        adjacent_faces = edge_face_map.FindFromKey(edge)
+                        if not adjacent_faces.IsEmpty():
+                            # Find the bore surface (tapered face going INTO fitting)
+                            for i in range(adjacent_faces.Size()):
+                                if i == 0:
+                                    f = TopoDS.Face_s(adjacent_faces.First())
+                                else:
+                                    f = TopoDS.Face_s(adjacent_faces.Last())
+                                fc = cq.Face(f).Center()
+
+                                # Bore face center is INSIDE the fitting (along axis)
+                                fc_dx = fc.x - opening_x
+                                fc_dy = fc.y - opening_y
+                                fc_dz = fc.z - opening_z
+                                fc_along = fc_dx * ax + fc_dy * ay + fc_dz * az
+
+                                # Bore face extends into fitting (positive along axis)
+                                if fc_along > 0.5:
+                                    best_edge = edge
+                                    best_face = f
+                                    best_radius = radius
+                                    break
+
+            explorer.Next()
+
+        if best_edge is None or best_face is None:
+            return fitting
+
+        # Apply chamfer to bore edge
+        chamfer_maker = BRepFilletAPI_MakeChamfer(solid)
+        chamfer_maker.Add(axial_depth, radial_depth, best_edge, best_face)
+        chamfer_maker.Build()
+
+        if chamfer_maker.IsDone():
+            return cq.Shape(chamfer_maker.Shape())
+        else:
+            return fitting
+
+    except Exception:
+        return fitting
 
 
 # =============================================================================
@@ -812,9 +1108,12 @@ def make_npt_internal_thread(
     nps: str,
     thread_length: float | None = None,
     simple: bool = False,
-    end_finishes: tuple[str, str] = ("fade", "fade"),
+    end_finishes: tuple[str, str] = ("chamfer", "fade"),
 ) -> cq.Shape:
     """Create internal NPT thread geometry (bore volume to cut from fitting).
+
+    Uses the die-cut approach: creates thread ridges using lofting and fuses
+    with a base bore cylinder. Supports chamfering at the bore opening.
 
     The thread is oriented with:
     - Axis along +Z
@@ -833,7 +1132,9 @@ def make_npt_internal_thread(
         nps: Nominal pipe size (e.g., "1/2", "1", "2")
         thread_length: Length of thread in mm. Defaults to L2 (effective thread length).
         simple: If True, return simplified representation (tapered cylinder bore)
-        end_finishes: Tuple of (start_finish, end_finish) - currently unused
+        end_finishes: Tuple of (start_finish, end_finish).
+            start_finish applies to Z=0 (fitting face): "chamfer" or "raw"
+            end_finish applies to Z=thread_length (into fitting): "fade" or "raw"
 
     Returns:
         CadQuery Shape representing the material to CUT from the fitting
@@ -843,7 +1144,6 @@ def make_npt_internal_thread(
     if thread_length is None:
         thread_length = spec.L2
 
-    pitch = spec.pitch_mm
     thread_depth = spec.thread_depth
 
     # For internal threads:
@@ -864,56 +1164,27 @@ def make_npt_internal_thread(
         # Simplified: tapered cylinder at root (major) diameter
         return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
 
-    # For internal threads, create helical groove that projects outward
-    # The cutter represents the thread ridges projecting into the bore
-
-    # Create tapered helix at apex radius
-    helix_wire = cq.Wire.makeHelix(
-        pitch=pitch,
-        height=thread_length,
-        radius=apex_radius_start,
-        angle=NPT_HALF_ANGLE_DEG,
-        lefthand=False,
-    )
-
-    # Profile for internal threads: groove projects outward (positive X)
-    flat_width = 0.038 * pitch
-    half_flat = flat_width / 2
-    flank_axial_span = thread_depth * math.tan(math.radians(30))
-
-    profile = (
-        cq.Workplane("XZ")
-        .transformed(offset=(apex_radius_start, 0, 0))
-        .polyline([
-            (0, -half_flat),
-            (thread_depth, -half_flat - flank_axial_span),
-            (thread_depth, half_flat + flank_axial_span),
-            (0, half_flat),
-        ])
-        .close()
-    )
+    # Parse end finishes
+    start_finish = end_finishes[0] if len(end_finishes) > 0 else "chamfer"
 
     try:
-        helix_path = cq.Workplane("XY").add(helix_wire)
-        thread_ridges = profile.sweep(helix_path, isFrenet=True)
-
-        # Base bore at apex level
+        # Step 1: Create base bore at apex (minor) radius
         base_bore = _make_tapered_cylinder(apex_radius_start, apex_radius_end, thread_length)
 
-        # Fuse ridges with base bore to get complete bore volume
-        ridge_solid = thread_ridges.val()
-        if isinstance(ridge_solid, (cq.Solid, cq.Shape)):
-            threaded_bore = base_bore.fuse(ridge_solid)
-        else:
-            solids = thread_ridges.solids().vals()
-            if solids:
-                first_solid = solids[0]
-                if isinstance(first_solid, cq.Shape):
-                    threaded_bore = base_bore.fuse(first_solid)
-                else:
-                    return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
-            else:
-                return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
+        # Step 2: Apply ID chamfer BEFORE creating thread ridges (if requested)
+        # The chamfer creates a flared entry at Z=0 (fitting face)
+        # Chamfer is 60° from vertical (30° from horizontal) - steeper angle
+        if start_finish == "chamfer":
+            radial_depth = thread_depth
+            # 60° from vertical means axial = radial × tan(30°)
+            axial_depth = radial_depth * math.tan(math.radians(30))
+            base_bore = apply_bore_chamfer(base_bore, radial_depth, axial_depth)
+
+        # Step 3: Create thread ridges using lofted cutter
+        thread_ridges = make_npt_internal_thread_cutter(nps, thread_length)
+
+        # Step 4: Fuse ridges with base bore to get complete bore volume
+        threaded_bore = base_bore.fuse(thread_ridges)
 
         if threaded_bore.isValid():
             return threaded_bore
@@ -921,7 +1192,7 @@ def make_npt_internal_thread(
     except Exception as e:
         print(f"Internal thread creation failed: {e}, using simplified geometry")
 
-    # Fallback to simplified geometry
+    # Fallback to simplified geometry (tapered cylinder at root diameter)
     return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
 
 

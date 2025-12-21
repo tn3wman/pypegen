@@ -17,7 +17,12 @@ from dataclasses import dataclass
 
 import cadquery as cq
 
-from pypegen.fittings.npt_thread import get_npt_spec, make_npt_internal_thread
+from pypegen.fittings.npt_thread import (
+    NPT_TAPER_RATIO,
+    apply_bore_id_chamfer,
+    get_npt_spec,
+    make_npt_internal_thread_cutter,
+)
 
 # =============================================================================
 # CONSTANTS
@@ -244,6 +249,63 @@ PIPE_OD: dict[str, float] = {
 # =============================================================================
 
 
+def _make_tapered_bore(
+    bore_radius_at_opening: float,
+    thread_length: float,
+) -> cq.Shape:
+    """Create a tapered cylinder for cutting bore.
+
+    The bore is LARGEST at Z=0 (fitting face) and SMALLEST at Z=thread_length.
+    This creates a flared entry that tapers down going into the fitting.
+
+    Args:
+        bore_radius_at_opening: Bore radius at the fitting face (Z=0)
+        thread_length: Length of the tapered section
+
+    Returns:
+        Tapered cylinder shape with larger end at Z=0
+    """
+    taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
+    bore_radius_at_end = bore_radius_at_opening - taper_delta  # Smaller going in
+
+    # Create tapered cylinder using loft
+    # LARGEST at opening (Z=0), SMALLEST going in (Z=thread_length)
+    bore = (
+        cq.Workplane("XY")
+        .circle(bore_radius_at_opening)  # Larger at opening
+        .workplane(offset=thread_length)
+        .circle(bore_radius_at_end)  # Smaller going in
+        .loft()
+    )
+    return cq.Shape(bore.val().wrapped)
+
+
+def _make_elbow_body_90(r_outer: float, center_to_end: float) -> cq.Shape:
+    """Create solid 90° elbow body.
+
+    The elbow is oriented with:
+    - Leg 1 along +X axis (opening at X=center_to_end)
+    - Leg 2 along +Y axis (opening at Y=center_to_end)
+    - Sphere at origin connects the two legs
+    """
+    A = center_to_end
+
+    # Outer body: two cylinders + full sphere at origin
+    leg1 = cq.Solid.makeCylinder(r_outer, A, cq.Vector(A, 0, 0), cq.Vector(-1, 0, 0))
+    leg2 = cq.Solid.makeCylinder(r_outer, A, cq.Vector(0, 0, 0), cq.Vector(0, 1, 0))
+    sphere = cq.Solid.makeSphere(
+        r_outer,
+        cq.Vector(0, 0, 0),
+        cq.Vector(0, 0, 1),
+        angleDegrees1=-90,
+        angleDegrees2=90,
+        angleDegrees3=360,
+    )
+
+    elbow = leg1.fuse(leg2).fuse(sphere)
+    return elbow
+
+
 def make_threaded_elbow_90(
     nps: str,
     pressure_class: int = 3000,
@@ -255,7 +317,13 @@ def make_threaded_elbow_90(
     The elbow is oriented with:
     - Inlet from +X direction toward origin
     - Outlet from origin toward +Y direction
-    - A sphere at origin connects the two legs
+    - A torus section at origin connects the two legs
+
+    For threaded version, uses die-cut approach:
+    1. Create solid outer elbow body (torus + legs)
+    2. Cut tapered bore (smallest at opening, largest at center)
+    3. Apply chamfer to bore ID edge
+    4. Cut thread grooves using helical V-groove cutter
 
     Args:
         nps: Nominal pipe size (e.g., "1/2", "2", "4")
@@ -278,77 +346,125 @@ def make_threaded_elbow_90(
 
     # Get dimensions
     A = dims.center_to_end  # Center to thread end
-
-    # Radii - threaded fittings have bore sized for pipe OD (threads are internal)
-    r_bore = pipe_od / 2.0  # Bore accepts pipe OD
     r_outer = dims.band_od / 2.0  # Outer body radius
 
-    # Outer body: two cylinders + full sphere at origin
-    leg1_outer = cq.Solid.makeCylinder(r_outer, A, cq.Vector(A, 0, 0), cq.Vector(-1, 0, 0))
-    leg2_outer = cq.Solid.makeCylinder(r_outer, A, cq.Vector(0, 0, 0), cq.Vector(0, 1, 0))
-    sphere_outer = cq.Solid.makeSphere(
+    # Create solid outer elbow body
+    elbow = _make_elbow_body_90(r_outer, A)
+
+    if not include_threads:
+        # Simple version: just cut cylindrical bore using same approach
+        r_bore = pipe_od / 2.0
+        inner = _make_elbow_body_90(r_bore, A)
+        elbow = elbow.cut(inner)
+    else:
+        # Threaded version: die-cut approach
+        npt_spec = get_npt_spec(nps)
+        thread_length = min(dims.min_thread_length, npt_spec.L2)
+        thread_depth = npt_spec.thread_depth
+
+        # Bore radius at opening (where external pipe thread crests contact)
+        bore_radius_at_opening = npt_spec.od / 2.0
+        taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
+        bore_radius_at_end = bore_radius_at_opening - taper_delta  # Smaller going in
+
+        # Step 1: Cut full bore through elbow at the SMALLEST radius
+        # This ensures bore goes all the way through with clearance
+        inner = _make_elbow_body_90(bore_radius_at_end, A)
+        elbow = elbow.cut(inner)
+
+        # Step 2: Cut tapered bore sections at each opening
+        # Leg 1: opening at X=A, bore toward -X
+        tapered_bore1 = _make_tapered_bore(bore_radius_at_opening, thread_length)
+        tapered_bore1 = tapered_bore1.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        tapered_bore1 = tapered_bore1.moved(cq.Location(cq.Vector(A, 0, 0)))
+        elbow = elbow.cut(tapered_bore1)
+
+        # Leg 2: opening at Y=A, bore toward -Y
+        tapered_bore2 = _make_tapered_bore(bore_radius_at_opening, thread_length)
+        tapered_bore2 = tapered_bore2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))
+        tapered_bore2 = tapered_bore2.moved(cq.Location(cq.Vector(0, A, 0)))
+        elbow = elbow.cut(tapered_bore2)
+
+        # Step 3: Apply chamfer to bore ID edges
+        # Chamfer is 60° from vertical (steeper angle)
+        radial_depth = thread_depth
+        axial_depth = radial_depth * math.tan(math.radians(30))
+
+        # Chamfer leg 1 bore (opening at X=A, axis points toward -X)
+        elbow = apply_bore_id_chamfer(
+            elbow,
+            bore_axis=(-1.0, 0.0, 0.0),
+            bore_opening=(A, 0.0, 0.0),
+            radial_depth=radial_depth,
+            axial_depth=axial_depth,
+        )
+
+        # Chamfer leg 2 bore (opening at Y=A, axis points toward -Y)
+        elbow = apply_bore_id_chamfer(
+            elbow,
+            bore_axis=(0.0, -1.0, 0.0),
+            bore_opening=(0.0, A, 0.0),
+            radial_depth=radial_depth,
+            axial_depth=axial_depth,
+        )
+
+        # Step 5: Create thread cutter and cut threads
+        thread_cutter = make_npt_internal_thread_cutter(nps, thread_length)
+
+        # Cut threads for leg 1 (+X direction)
+        # Thread cutter is generated along +Z axis
+        # Rotate -90° around Y to align with -X axis (toward center from opening)
+        cutter1 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        cutter1 = cutter1.moved(cq.Location(cq.Vector(A, 0, 0)))
+        elbow = elbow.cut(cutter1)
+
+        # Cut threads for leg 2 (+Y direction)
+        # Rotate +90° around X to align with -Y axis (toward center from opening)
+        cutter2 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))
+        cutter2 = cutter2.moved(cq.Location(cq.Vector(0, A, 0)))
+        elbow = elbow.cut(cutter2)
+
+    return elbow
+
+
+def _make_elbow_body_45(r_outer: float, center_to_end: float) -> cq.Shape:
+    """Create solid 45° elbow body.
+
+    The elbow is oriented with:
+    - Leg 1 along +X axis (opening at X=center_to_end)
+    - Leg 2 along 135° direction (45° turn from inlet)
+    - Sphere wedge at origin connects the two legs
+    """
+    A = center_to_end
+
+    # Direction for 45° leg (135° from +X)
+    angle_rad = math.radians(135)
+    dir_x = math.cos(angle_rad)
+    dir_y = math.sin(angle_rad)
+
+    # Leg 1: inlet from +X direction
+    leg1 = cq.Solid.makeCylinder(r_outer, A, cq.Vector(A, 0, 0), cq.Vector(-1, 0, 0))
+
+    # Leg 2: outlet toward 135° direction
+    leg2 = cq.Solid.makeCylinder(
+        r_outer,
+        A,
+        cq.Vector(0, 0, 0),
+        cq.Vector(dir_x, dir_y, 0),
+    )
+
+    # 90° sphere wedge at origin, rotated 180° to fill gap between legs
+    sphere = cq.Solid.makeSphere(
         r_outer,
         cq.Vector(0, 0, 0),
         cq.Vector(0, 0, 1),
         angleDegrees1=-90,
         angleDegrees2=90,
-        angleDegrees3=360,
+        angleDegrees3=90,  # 90° wedge
     )
+    sphere = sphere.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 180))
 
-    outer = leg1_outer.fuse(leg2_outer).fuse(sphere_outer)
-
-    # Inner bore: same shape with r_bore
-    leg1_inner = cq.Solid.makeCylinder(r_bore, A, cq.Vector(A, 0, 0), cq.Vector(-1, 0, 0))
-    leg2_inner = cq.Solid.makeCylinder(r_bore, A, cq.Vector(0, 0, 0), cq.Vector(0, 1, 0))
-    sphere_inner = cq.Solid.makeSphere(
-        r_bore,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 0, 1),
-        angleDegrees1=-90,
-        angleDegrees2=90,
-        angleDegrees3=360,
-    )
-
-    inner = leg1_inner.fuse(leg2_inner).fuse(sphere_inner)
-
-    # Cut inner from outer to create hollow elbow
-    elbow = outer.cut(inner)
-
-    # Add internal threads if requested
-    if include_threads:
-        npt_spec = get_npt_spec(nps)
-        thread_length = min(dims.min_thread_length, npt_spec.L2)
-
-        # Create internal thread (generated along +Z axis, represents volume to CUT)
-        # Thread starts at Z=0 (smaller opening) and expands toward Z=thread_length (larger opening)
-        # When cutting, the smaller opening should be at the fitting face
-        # and the larger opening should be deeper inside the fitting
-        thread = make_npt_internal_thread(nps, thread_length=thread_length)
-
-        # Leg 1 (inlet): Thread at +X end
-        # The fitting face is at +X (x=A), and the thread should extend toward center (toward x=0)
-        # Rotate +90° around Y: +Z maps to +X direction
-        # After rotation: Z=0 (smaller) is at origin, Z=L (larger) is at +X
-        # After translation to (A,0,0): smaller at (A,0,0), larger at (A-L,0,0) toward center
-        # Wait, that's wrong. Let me re-derive:
-        # Ry(+90°): (x,y,z) -> (-z, y, x)
-        # Point (0,0,0) -> (0,0,0)
-        # Point (0,0,L) -> (-L,0,0)
-        # After translate (A,0,0): smaller at (A,0,0), larger at (A-L,0,0) ✓
-        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # +Z to -X
-        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Position at inlet face
-        elbow = elbow.cut(thread1)
-
-        # Leg 2 (outlet): Thread at +Y end
-        # Fitting face is at +Y (y=A), thread should extend toward center (toward y=0)
-        # Rotate +90° around X: (x,y,z) -> (x, -z, y)
-        # Point (0,0,0) -> (0,0,0)
-        # Point (0,0,L) -> (0,-L,0)
-        # After translate (0,A,0): smaller at (0,A,0), larger at (0,A-L,0) ✓
-        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))  # +Z to -Y
-        thread2 = thread2.moved(cq.Location(cq.Vector(0, A, 0)))  # Position at outlet face
-        elbow = elbow.cut(thread2)
-
+    elbow = leg1.fuse(leg2).fuse(sphere)
     return elbow
 
 
@@ -363,6 +479,12 @@ def make_threaded_elbow_45(
     The elbow is oriented with:
     - Inlet from +X direction toward origin
     - Outlet from origin toward 135° direction (45° turn from inlet)
+
+    For threaded version, uses die-cut approach:
+    1. Create solid outer elbow body (torus + legs)
+    2. Cut tapered bore (smallest at opening, largest at center)
+    3. Apply chamfer to bore ID edge
+    4. Cut thread grooves using helical V-groove cutter
 
     Args:
         nps: Nominal pipe size (e.g., "1/2", "2", "4")
@@ -385,9 +507,6 @@ def make_threaded_elbow_45(
 
     # Get dimensions
     A = dims.center_to_end  # Center to thread end
-
-    # Radii
-    r_bore = pipe_od / 2.0  # Bore accepts pipe OD
     r_outer = dims.band_od / 2.0  # Outer body radius
 
     # Direction for 45° leg (45° turn from -X toward +Y)
@@ -396,83 +515,85 @@ def make_threaded_elbow_45(
     dir_x = math.cos(angle_rad)  # ~-0.707
     dir_y = math.sin(angle_rad)  # ~0.707
 
-    # Leg 1: inlet from +X direction
-    leg1_outer = cq.Solid.makeCylinder(r_outer, A, cq.Vector(A, 0, 0), cq.Vector(-1, 0, 0))
+    # Create solid outer elbow body
+    elbow = _make_elbow_body_45(r_outer, A)
 
-    # Leg 2: outlet toward 135° direction
-    leg2_outer = cq.Solid.makeCylinder(
-        r_outer,
-        A,
-        cq.Vector(0, 0, 0),
-        cq.Vector(dir_x, dir_y, 0),
-    )
-
-    # 90° sphere wedge at origin, rotated 180° to fill gap between legs
-    # (Same approach as socket weld 45° elbow)
-    sphere_outer = cq.Solid.makeSphere(
-        r_outer,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 0, 1),
-        angleDegrees1=-90,
-        angleDegrees2=90,
-        angleDegrees3=90,  # 90° wedge
-    )
-    sphere_outer = sphere_outer.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 180))
-
-    outer = leg1_outer.fuse(leg2_outer).fuse(sphere_outer)
-
-    # Inner bore
-    leg1_inner = cq.Solid.makeCylinder(r_bore, A, cq.Vector(A, 0, 0), cq.Vector(-1, 0, 0))
-    leg2_inner = cq.Solid.makeCylinder(
-        r_bore,
-        A,
-        cq.Vector(0, 0, 0),
-        cq.Vector(dir_x, dir_y, 0),
-    )
-    sphere_inner = cq.Solid.makeSphere(
-        r_bore,
-        cq.Vector(0, 0, 0),
-        cq.Vector(0, 0, 1),
-        angleDegrees1=-90,
-        angleDegrees2=90,
-        angleDegrees3=90,
-    )
-    sphere_inner = sphere_inner.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), 180))
-
-    inner = leg1_inner.fuse(leg2_inner).fuse(sphere_inner)
-
-    # Cut inner from outer
-    elbow = outer.cut(inner)
-
-    # Add internal threads if requested
-    if include_threads:
+    if not include_threads:
+        # Simple version: just cut cylindrical bore using same approach
+        r_bore = pipe_od / 2.0
+        inner = _make_elbow_body_45(r_bore, A)
+        elbow = elbow.cut(inner)
+    else:
+        # Threaded version: die-cut approach
         npt_spec = get_npt_spec(nps)
         thread_length = min(dims.min_thread_length, npt_spec.L2)
+        thread_depth = npt_spec.thread_depth
 
-        # Create internal thread (generated along +Z axis, represents volume to CUT)
-        # Thread starts at Z=0 (smaller opening) and expands toward Z=thread_length (larger opening)
-        thread = make_npt_internal_thread(nps, thread_length=thread_length)
+        # Bore radius at opening (where external pipe thread crests contact)
+        bore_radius_at_opening = npt_spec.od / 2.0
+        taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
+        bore_radius_at_end = bore_radius_at_opening - taper_delta  # Smaller going in
 
-        # Leg 1 (inlet): Thread at +X end
-        # Same as 90° elbow - Ry(+90°): smaller at face, larger toward center
-        thread1 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # +Z to -X
-        thread1 = thread1.moved(cq.Location(cq.Vector(A, 0, 0)))  # Position at inlet face
-        elbow = elbow.cut(thread1)
-
-        # Leg 2 (outlet): Thread at 135° end
-        # The outlet is at angle 135° from +X in XY plane
-        # Thread should extend from face toward center
-        # First rotate around Z to align with outlet direction, then tilt
+        # Outlet end position
         outlet_end_x = A * dir_x
         outlet_end_y = A * dir_y
-        # The thread +Z needs to point toward center, which is at -135° = -135° from +X
-        # Or equivalently, 45° + 180° = 225° from +X
-        # Rotate around Z by 45° to get +X pointing toward center direction
-        # Then rotate around the new Y to tilt +Z into the XY plane pointing toward center
-        thread2 = thread.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90))  # Tilt +Z to -X
-        thread2 = thread2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), -45))  # Rotate to outlet direction
-        thread2 = thread2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))  # Position at outlet face
-        elbow = elbow.cut(thread2)
+
+        # Step 1: Cut full bore through elbow at the SMALLEST radius
+        inner = _make_elbow_body_45(bore_radius_at_end, A)
+        elbow = elbow.cut(inner)
+
+        # Step 2: Cut tapered bore sections at each opening
+        # Leg 1: opening at X=A, bore toward -X
+        tapered_bore1 = _make_tapered_bore(bore_radius_at_opening, thread_length)
+        tapered_bore1 = tapered_bore1.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        tapered_bore1 = tapered_bore1.moved(cq.Location(cq.Vector(A, 0, 0)))
+        elbow = elbow.cut(tapered_bore1)
+
+        # Leg 2: opening at 135° end, bore toward center
+        tapered_bore2 = _make_tapered_bore(bore_radius_at_opening, thread_length)
+        # Rotate to align with the 135° leg axis (pointing toward center)
+        tapered_bore2 = tapered_bore2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        tapered_bore2 = tapered_bore2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), -45))
+        tapered_bore2 = tapered_bore2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))
+        elbow = elbow.cut(tapered_bore2)
+
+        # Step 3: Apply chamfer to bore ID edges
+        radial_depth = thread_depth
+        axial_depth = radial_depth * math.tan(math.radians(30))
+
+        # Chamfer leg 1 bore (opening at X=A, axis points toward -X)
+        elbow = apply_bore_id_chamfer(
+            elbow,
+            bore_axis=(-1.0, 0.0, 0.0),
+            bore_opening=(A, 0.0, 0.0),
+            radial_depth=radial_depth,
+            axial_depth=axial_depth,
+        )
+
+        # Chamfer leg 2 bore (opening at 135° end, axis points toward center)
+        # Axis direction is opposite of outlet direction: (-dir_x, -dir_y, 0)
+        elbow = apply_bore_id_chamfer(
+            elbow,
+            bore_axis=(-dir_x, -dir_y, 0.0),
+            bore_opening=(outlet_end_x, outlet_end_y, 0.0),
+            radial_depth=radial_depth,
+            axial_depth=axial_depth,
+        )
+
+        # Step 4: Create thread cutter and cut threads
+        thread_cutter = make_npt_internal_thread_cutter(nps, thread_length)
+
+        # Cut threads for leg 1 (+X direction)
+        # Rotate -90° around Y to align with -X axis
+        cutter1 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        cutter1 = cutter1.moved(cq.Location(cq.Vector(A, 0, 0)))
+        elbow = elbow.cut(cutter1)
+
+        # Cut threads for leg 2 (135° direction)
+        cutter2 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        cutter2 = cutter2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), -45))
+        cutter2 = cutter2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))
+        elbow = elbow.cut(cutter2)
 
     return elbow
 
