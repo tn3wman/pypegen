@@ -1,17 +1,20 @@
 """
-NPT Thread Generator for CadQuery.
+NPT Thread Generator for CadQuery - Die-Cut Approach.
 
-Creates actual 3D NPT (National Pipe Taper) thread geometry per ASME B1.20.1.
-Supports both external (pipe) and internal (fitting) threads.
+Creates actual 3D NPT (National Pipe Taper) thread geometry per ASME B1.20.1
+using a die-cut (subtractive) approach that mimics real-world thread cutting.
+
+Approach:
+1. Create tapered pipe end at major thread OD
+2. Create helical V-groove cutting tool by sweeping profile along helix
+3. Boolean subtract cutter from pipe to form threads
+4. Add gradual runout fade at pipe junction
 
 NPT Thread Specifications:
 - Taper: 1:16 (3/4 inch per foot)
 - Half-angle: 1° 47' 24" (1.7899°)
 - Thread angle: 60°
 - Thread form: Truncated flat crests/roots
-
-Implementation uses ruled surfaces between helical wires (like cq_warehouse)
-for reliable thread generation.
 
 Sources:
 - ASME B1.20.1: Pipe Threads, General Purpose (Inch)
@@ -236,927 +239,375 @@ def get_npt_spec(nps: str) -> NPTSpec:
 
 
 # =============================================================================
-# THREAD GEOMETRY GENERATION - RULED SURFACE APPROACH (based on cq_warehouse)
+# HELPER FUNCTIONS
 # =============================================================================
 
 
-class ThreadBuilder:
-    """Builder class for creating NPT thread geometry following cq_warehouse approach exactly.
+def _make_tapered_cylinder(radius_start: float, radius_end: float, height: float) -> cq.Solid:
+    """Create a tapered cylinder (truncated cone).
 
-    This class encapsulates all the thread generation logic including:
-    - Main helix sections using cq.Wire.makeHelix()
-    - Fade sections using parametric curves
-    - End caps and connecting faces
-    - All end_finishes: raw, fade, square, chamfer
+    Args:
+        radius_start: Radius at Z=0
+        radius_end: Radius at Z=height
+        height: Height of cylinder
+
+    Returns:
+        CadQuery Solid of the tapered cylinder
     """
+    return cq.Solid.makeCone(
+        radius1=radius_start,
+        radius2=radius_end,
+        height=height,
+        pnt=cq.Vector(0, 0, 0),
+        dir=cq.Vector(0, 0, 1),
+    )
 
-    def __init__(
-        self,
-        apex_radius: float,
-        root_radius: float,
-        pitch: float,
-        length: float,
-        taper_angle: float = 0.0,
-        external: bool = True,
-        end_finishes: tuple[str, str] = ("fade", "fade"),
-        right_hand: bool = True,
-        blend_radius: float | None = None,
-        runout_turns: float = 0.25,
-    ):
-        """Initialize thread builder.
 
-        Args:
-            apex_radius: Radius at thread crest (tips)
-            root_radius: Radius at thread root (valleys)
-            pitch: Thread pitch (mm)
-            length: Thread length (mm)
-            taper_angle: Helix taper half-angle in degrees
-            external: True for external threads
-            end_finishes: Tuple of (start_finish, end_finish) - "fade", "pipe_junction", "raw", "square"
-            right_hand: True for right-hand threads
-            blend_radius: Target radius for "pipe_junction" fade (typically pipe OD)
-            runout_turns: Thread runout length in turns (default 0.25 = 90 degrees)
-        """
-        self.apex_radius = apex_radius
-        self.root_radius = root_radius
-        self.pitch = pitch
-        self.length = length
-        self.taper = taper_angle  # cq_warehouse calls it "taper"
-        self.external = external
-        self.end_finishes = end_finishes
-        self.right_hand = right_hand
-        self.blend_radius = blend_radius
-        self.runout_turns = runout_turns
-        self.runout_length = pitch * runout_turns
-        self.runout_angle = 2 * math.pi * runout_turns
+# =============================================================================
+# DIE-CUT THREAD GENERATION
+# =============================================================================
 
-        # Thread profile widths (helical wire offsets for ruled surface geometry)
-        # These define the Z-offset between paired helical wires that form
-        # the crest and root surfaces.
-        #
-        # For NPT threads per ASME B1.20.1:
-        # - Thread depth h = 0.8P
-        # - Flank angle = 30° (60° included angle)
-        # - Flank axial span = h × tan(30°) = 0.8P × 0.577 = 0.462P
-        # - Remaining for flats = P - 2×0.462P = 0.076P
-        # - Symmetric truncation: apex_flat = root_flat = 0.038P
-        #
-        # The apex_width is the crest flat width.
-        # The root_width spans from one flank edge across the root to the other flank.
-        # root_width = apex_width + 2×flank_span = 0.038P + 0.924P = 0.962P
-        thread_depth = 0.8 * pitch
-        flank_axial_span = thread_depth * math.tan(math.radians(30))  # 0.462P
-        flat_width = pitch - 2 * flank_axial_span  # 0.076P total for both flats
 
-        if external:
-            self.apex_width = flat_width / 2  # ~0.038P (crest flat)
-            self.root_width = self.apex_width + 2 * flank_axial_span  # ~0.962P
-        else:
-            # Internal threads: apex is at smaller radius, root at larger
-            self.apex_width = flat_width / 2  # ~0.038P
-            self.root_width = self.apex_width + 2 * flank_axial_span  # ~0.962P
-
-        # Tooth height
-        self.tooth_height = abs(apex_radius - root_radius)
-
-        # Small adjustment to root radius to avoid coincident surfaces
-        self.root_radius_adjusted = root_radius - 0.001 if external else root_radius + 0.001
-
-    def fade_helix(
-        self,
-        t: float,
-        apex: bool,
-        vertical_displacement: float,
-        z_offset: float = 0.0,
-        fade_in: bool = False,
-    ) -> tuple[float, float, float]:
-        """Parametric fade helix function with NPT taper correction.
-
-        Creates a runout arc where the thread height fades from full to zero
-        over the configured runout length. For NPT threads, the radius also changes during
-        this arc according to the taper angle.
-
-        Args:
-            t: Parameter from 0 to 1 (0 = full thread height, 1 = faded to nothing)
-            apex: True for apex wire, False for root wire
-            vertical_displacement: Additional Z displacement for root wires
-            z_offset: Starting Z position for radius taper calculation
-
-        Returns:
-            (x, y, z) coordinates
-        """
-        # Z position within this fade section
-        z_local = t * self.runout_length + t * vertical_displacement
-        z_total = z_offset + z_local
-
-        # Calculate taper-adjusted base radii at this Z position
-        # For positive taper angle, radius increases with Z
-        taper_delta = z_total * math.tan(math.radians(self.taper)) if self.taper != 0 else 0.0
-
-        apex_radius_at_z = self.apex_radius + taper_delta
-        root_radius_at_z = self.root_radius_adjusted + taper_delta
-        tooth_height_at_z = abs(apex_radius_at_z - root_radius_at_z)
-
-        # Apply fade interpolation (sine curve from full height to zero)
-        fade_factor = math.sin(t * math.pi / 2)
-        if fade_in:
-            fade_factor = math.cos(t * math.pi / 2)
-
-        if self.external:
-            radius = apex_radius_at_z - fade_factor * tooth_height_at_z if apex else root_radius_at_z
-        else:
-            radius = apex_radius_at_z + fade_factor * tooth_height_at_z if apex else root_radius_at_z
-
-        angle = t * self.runout_angle
-        x_pos = radius * math.cos(angle)
-        y_pos = radius * math.sin(angle)
-
-        return (x_pos, y_pos, z_local)
-
-    def pipe_junction_fade_helix(
-        self,
-        t: float,
-        apex: bool,
-        vertical_displacement: float,
-        z_offset: float = 0.0,
-        fade_in: bool = False,
-    ) -> tuple[float, float, float]:
-        """Parametric fade for pipe junction where both apex and root converge to blend_radius.
-
-        Unlike regular fade_helix (where apex fades to root level), this fade:
-        - Apex fades DOWN from apex_radius to blend_radius (pipe OD)
-        - Root EXPANDS UP from root_radius to blend_radius (pipe OD)
-        - Both converge at blend_radius, eliminating the step at pipe junction
-
-        Args:
-            t: Parameter from 0 to 1 (0 = full thread, 1 = blended to pipe OD)
-            apex: True for apex wire, False for root wire
-            vertical_displacement: Additional Z displacement for root wires
-            z_offset: Starting Z position for radius taper calculation
-
-        Returns:
-            (x, y, z) coordinates
-        """
-        if self.blend_radius is None:
-            raise ValueError("blend_radius must be set for pipe_junction fade")
-
-        # Z position within this fade section
-        z_local = t * self.runout_length + t * vertical_displacement
-        z_total = z_offset + z_local
-
-        # Calculate taper-adjusted radii at this Z position
-        taper_delta = z_total * math.tan(math.radians(self.taper)) if self.taper != 0 else 0.0
-
-        apex_radius_at_z = self.apex_radius + taper_delta
-        root_radius_at_z = self.root_radius_adjusted + taper_delta
-        # Pipe OD/ID is constant; do not taper blend radius.
-        blend_radius_at_z = self.blend_radius
-
-        # Apply fade interpolation (sine curve)
-        fade_factor = math.sin(t * math.pi / 2)
-        if fade_in:
-            fade_factor = math.cos(t * math.pi / 2)
-
-        if apex:
-            # Apex fades from apex_radius toward blend_radius
-            if self.external:
-                # External: apex is larger, blend is even larger (pipe OD)
-                # apex → blend (upward for external threads)
-                radius = apex_radius_at_z + fade_factor * (blend_radius_at_z - apex_radius_at_z)
-            else:
-                # Internal: apex is smaller, blend is smaller (pipe ID)
-                radius = apex_radius_at_z - fade_factor * (apex_radius_at_z - blend_radius_at_z)
-        else:
-            # Root expands from root_radius toward blend_radius
-            if self.external:
-                # External: root is smaller than blend (pipe OD)
-                radius = root_radius_at_z + fade_factor * (blend_radius_at_z - root_radius_at_z)
-            else:
-                # Internal: root is larger, blend is smaller
-                radius = root_radius_at_z - fade_factor * (root_radius_at_z - blend_radius_at_z)
-
-        angle = t * self.runout_angle
-        x_pos = radius * math.cos(angle)
-        y_pos = radius * math.sin(angle)
-
-        return (x_pos, y_pos, z_local)
-
-    def make_thread_faces(
-        self,
-        length: float,
-        fade_helix: bool = False,
-    ) -> tuple[list[cq.Face], list[cq.Face]]:
-        """Create thread faces - following cq_warehouse approach exactly.
-
-        Args:
-            length: Length of thread
-            fade_helix: If True, use parametric fade curves instead of helixes
-
-        Returns:
-            Tuple of (thread_faces, end_faces)
-        """
-        local_apex_offset = 0  # Can be used for alignment
-
-        if fade_helix:
-            # Use parametric curves for fade
-            apex_helix_wires = []
-            root_helix_wires = []
-
-            for i in [-0.5, 0.5]:
-                # Apex wire - no vertical displacement
-                i_val = i  # Capture for closure
-
-                def make_apex(t: float, i_=i_val) -> tuple[float, float, float]:
-                    return self.fade_helix(t, apex=True, vertical_displacement=0)
-
-                apex_result = cq.Workplane("XY").parametricCurve(make_apex, N=20).val()
-                if isinstance(apex_result, cq.Edge):
-                    apex_result = cq.Wire.assembleEdges([apex_result])
-                apex_wire = apex_result.translate(cq.Vector(0, 0, i_val * self.apex_width + local_apex_offset))
-                apex_helix_wires.append(apex_wire)
-
-                # Root wire - has vertical displacement per cq_warehouse
-                vert_disp = -i_val * (self.root_width - self.apex_width)
-
-                def make_root(t: float, vd=vert_disp) -> tuple[float, float, float]:
-                    return self.fade_helix(t, apex=False, vertical_displacement=vd)
-
-                root_result = cq.Workplane("XY").parametricCurve(make_root, N=20).val()
-                if isinstance(root_result, cq.Edge):
-                    root_result = cq.Wire.assembleEdges([root_result])
-                root_wire = root_result.translate(cq.Vector(0, 0, i_val * self.root_width))
-                root_helix_wires.append(root_wire)
-        else:
-            # Use standard makeHelix
-            apex_helix_wires = [
-                cq.Wire.makeHelix(
-                    pitch=self.pitch,
-                    height=length,
-                    radius=self.apex_radius,
-                    angle=self.taper,
-                    lefthand=not self.right_hand,
-                ).translate(cq.Vector(0, 0, i * self.apex_width + local_apex_offset))
-                for i in [-0.5, 0.5]
-            ]
-
-            root_helix_wires = [
-                cq.Wire.makeHelix(
-                    pitch=self.pitch,
-                    height=length,
-                    radius=self.root_radius_adjusted,
-                    angle=self.taper,
-                    lefthand=not self.right_hand,
-                ).translate(cq.Vector(0, 0, i * self.root_width))
-                for i in [-0.5, 0.5]
-            ]
-
-        # Create 4 ruled surfaces forming thread profile
-        thread_faces = [
-            cq.Face.makeRuledSurface(apex_helix_wires[0], apex_helix_wires[1]),
-            cq.Face.makeRuledSurface(apex_helix_wires[1], root_helix_wires[1]),
-            cq.Face.makeRuledSurface(root_helix_wires[1], root_helix_wires[0]),
-            cq.Face.makeRuledSurface(root_helix_wires[0], apex_helix_wires[0]),
-        ]
-
-        # End caps - only create at positions where not faded
-        # For fade_helix, only cap at position 0 (not 1, since it fades to nothing)
-        end_caps = [0] if fade_helix else [0, 1]
-        end_cap_wires = [
-            cq.Wire.makePolygon(
-                [
-                    apex_helix_wires[0].positionAt(i),
-                    apex_helix_wires[1].positionAt(i),
-                    root_helix_wires[1].positionAt(i),
-                    root_helix_wires[0].positionAt(i),
-                    apex_helix_wires[0].positionAt(i),
-                ]
-            )
-            for i in end_caps
-        ]
-        end_faces = [cq.Face.makeFromWires(w) for w in end_cap_wires]
-
-        return thread_faces, end_faces
-
-    def make_thread_faces_tapered_fade(
-        self,
-        z_offset: float,
-    ) -> tuple[list[cq.Face], list[cq.Face]]:
-        """Create fade section faces with NPT taper correction.
-
-        The fade section uses the configured runout length.
-
-        Args:
-            z_offset: Z position where this fade section starts (for taper calculation)
-
-        Returns:
-            Tuple of (thread_faces, end_faces)
-        """
-        apex_helix_wires = []
-        root_helix_wires = []
-
-        for i in [-0.5, 0.5]:
-            # Capture values for closure
-            i_val = i
-            z_off = z_offset
-
-            # Apex wire with taper-corrected fade
-            def make_apex(t: float, z_=z_off) -> tuple[float, float, float]:
-                return self.fade_helix(t, apex=True, vertical_displacement=0, z_offset=z_)
-
-            apex_result = cq.Workplane("XY").parametricCurve(make_apex, N=30).val()
-            if isinstance(apex_result, cq.Edge):
-                apex_result = cq.Wire.assembleEdges([apex_result])
-            apex_wire = apex_result.translate(cq.Vector(0, 0, i_val * self.apex_width))
-            apex_helix_wires.append(apex_wire)
-
-            # Root wire with taper-corrected fade
-            vert_disp = -i_val * (self.root_width - self.apex_width)
-
-            def make_root(t: float, vd=vert_disp, z_=z_off) -> tuple[float, float, float]:
-                return self.fade_helix(t, apex=False, vertical_displacement=vd, z_offset=z_)
-
-            root_result = cq.Workplane("XY").parametricCurve(make_root, N=30).val()
-            if isinstance(root_result, cq.Edge):
-                root_result = cq.Wire.assembleEdges([root_result])
-            root_wire = root_result.translate(cq.Vector(0, 0, i_val * self.root_width))
-            root_helix_wires.append(root_wire)
-
-        # Create 4 ruled surfaces forming thread profile
-        thread_faces = [
-            cq.Face.makeRuledSurface(apex_helix_wires[0], apex_helix_wires[1]),
-            cq.Face.makeRuledSurface(apex_helix_wires[1], root_helix_wires[1]),
-            cq.Face.makeRuledSurface(root_helix_wires[1], root_helix_wires[0]),
-            cq.Face.makeRuledSurface(root_helix_wires[0], apex_helix_wires[0]),
-        ]
-
-        # End cap at position 0 only (position 1 fades to nothing)
-        end_cap_wire = cq.Wire.makePolygon(
-            [
-                apex_helix_wires[0].positionAt(0),
-                apex_helix_wires[1].positionAt(0),
-                root_helix_wires[1].positionAt(0),
-                root_helix_wires[0].positionAt(0),
-                apex_helix_wires[0].positionAt(0),
-            ]
-        )
-        end_faces = [cq.Face.makeFromWires(end_cap_wire)]
-
-        return thread_faces, end_faces
-
-    def make_thread_with_faded_ends(self) -> cq.Shape:
-        """Build thread with proper fade runout at ends.
-
-        Returns:
-            Thread solid as CadQuery Shape
-        """
-        start_finish, end_finish = self.end_finishes
-        fade_start = start_finish == "fade"
-        fade_end = end_finish == "fade"
-        pipe_junction_end = end_finish == "pipe_junction"
-        runout_length = self.runout_length
-        start_len = runout_length if fade_start else 0.0
-        end_len = runout_length if (fade_end or pipe_junction_end) else 0.0
-        cylindrical_length = self.length - start_len - end_len
-
-        if cylindrical_length < 0:
-            raise ValueError(f"Thread length {self.length} too short for runout sections")
-
-        cylindrical_angle = (360 if self.right_hand else -360) * cylindrical_length / self.pitch
-        runout_angle = (360 if self.right_hand else -360) * self.runout_turns
-
-        # === 1. Create cylindrical thread faces ===
-        thread_faces: list[cq.Face] = []
-        end_faces: list[cq.Face] = []
-        if cylindrical_length > 0:
-            cyl_apex_wires = [
-                cq.Wire.makeHelix(
-                    pitch=self.pitch,
-                    height=cylindrical_length,
-                    radius=self.apex_radius,
-                    angle=self.taper,
-                    lefthand=not self.right_hand,
-                ).translate(cq.Vector(0, 0, i * self.apex_width))
-                for i in [-0.5, 0.5]
-            ]
-
-            cyl_root_wires = [
-                cq.Wire.makeHelix(
-                    pitch=self.pitch,
-                    height=cylindrical_length,
-                    radius=self.root_radius_adjusted,
-                    angle=self.taper,
-                    lefthand=not self.right_hand,
-                ).translate(cq.Vector(0, 0, i * self.root_width))
-                for i in [-0.5, 0.5]
-            ]
-
-            thread_faces = [
-                cq.Face.makeRuledSurface(cyl_apex_wires[0], cyl_apex_wires[1]),
-                cq.Face.makeRuledSurface(cyl_apex_wires[1], cyl_root_wires[1]),
-                cq.Face.makeRuledSurface(cyl_root_wires[1], cyl_root_wires[0]),
-                cq.Face.makeRuledSurface(cyl_root_wires[0], cyl_apex_wires[0]),
-            ]
-
-            end_cap_wires = [
-                cq.Wire.makePolygon([
-                    cyl_apex_wires[0].positionAt(i),
-                    cyl_apex_wires[1].positionAt(i),
-                    cyl_root_wires[1].positionAt(i),
-                    cyl_root_wires[0].positionAt(i),
-                    cyl_apex_wires[0].positionAt(i),
-                ])
-                for i in [0, 1]
-            ]
-            end_faces = [cq.Face.makeFromWires(w) for w in end_cap_wires]
-
-            thread_faces = [f.translate(cq.Vector(0, 0, start_len)) for f in thread_faces]
-            end_faces = [f.translate(cq.Vector(0, 0, start_len)) for f in end_faces]
-
-        def build_fade_faces(
-            fade_in: bool,
-            pipe_junction: bool,
-            z_offset: float,
-            angle_offset: float,
-        ) -> list[cq.Face]:
-            apex_wires: list[cq.Wire] = []
-            root_wires: list[cq.Wire] = []
-            for i in [-0.5, 0.5]:
-                i_val = i
-
-                def make_apex(t: float, z_off: float = z_offset) -> tuple[float, float, float]:
-                    if pipe_junction:
-                        return self.pipe_junction_fade_helix(
-                            t,
-                            apex=True,
-                            vertical_displacement=0,
-                            z_offset=z_off,
-                            fade_in=fade_in,
-                        )
-                    return self.fade_helix(
-                        t,
-                        apex=True,
-                        vertical_displacement=0,
-                        z_offset=z_off,
-                        fade_in=fade_in,
-                    )
-
-                edge = cq.Workplane("XY").parametricCurve(make_apex, N=30).val()
-                wire = cq.Wire.assembleEdges([edge]) if isinstance(edge, cq.Edge) else edge
-                wire = wire.translate(cq.Vector(0, 0, i_val * self.apex_width))
-                apex_wires.append(wire)
-
-                vert_disp = -i_val * (self.root_width - self.apex_width)
-
-                def make_root(t: float, vd: float = vert_disp, z_off: float = z_offset) -> tuple[float, float, float]:
-                    if pipe_junction:
-                        return self.pipe_junction_fade_helix(
-                            t,
-                            apex=False,
-                            vertical_displacement=vd,
-                            z_offset=z_off,
-                            fade_in=fade_in,
-                        )
-                    return self.fade_helix(
-                        t,
-                        apex=False,
-                        vertical_displacement=vd,
-                        z_offset=z_off,
-                        fade_in=fade_in,
-                    )
-
-                edge = cq.Workplane("XY").parametricCurve(make_root, N=30).val()
-                wire = cq.Wire.assembleEdges([edge]) if isinstance(edge, cq.Edge) else edge
-                wire = wire.translate(cq.Vector(0, 0, i_val * self.root_width))
-                root_wires.append(wire)
-
-            faces = [
-                cq.Face.makeRuledSurface(apex_wires[0], apex_wires[1]),
-                cq.Face.makeRuledSurface(apex_wires[1], root_wires[1]),
-                cq.Face.makeRuledSurface(root_wires[1], root_wires[0]),
-                cq.Face.makeRuledSurface(root_wires[0], apex_wires[0]),
-            ]
-
-            if not self.right_hand:
-                faces = [f.mirror("XZ") for f in faces]
-
-            if angle_offset != 0:
-                faces = [f.rotate(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), angle_offset) for f in faces]
-
-            if z_offset != 0:
-                faces = [f.translate(cq.Vector(0, 0, z_offset)) for f in faces]
-
-            return faces
-
-        # === 2. Collect faces ===
-        all_faces = list(thread_faces)
-
-        if fade_start:
-            fade_faces_bottom = build_fade_faces(
-                fade_in=True,
-                pipe_junction=False,
-                z_offset=0.0,
-                angle_offset=-runout_angle,
-            )
-            all_faces.extend(fade_faces_bottom)
-
-        top_z = start_len + cylindrical_length
-        if fade_end:
-            fade_faces_top = build_fade_faces(
-                fade_in=False,
-                pipe_junction=False,
-                z_offset=top_z,
-                angle_offset=cylindrical_angle,
-            )
-            all_faces.extend(fade_faces_top)
-
-        if pipe_junction_end:
-            pj_faces_top = build_fade_faces(
-                fade_in=False,
-                pipe_junction=True,
-                z_offset=top_z,
-                angle_offset=cylindrical_angle,
-            )
-            all_faces.extend(pj_faces_top)
-
-        if cylindrical_length > 0:
-            if not fade_start:
-                all_faces.append(end_faces[0])
-            if not (fade_end or pipe_junction_end):
-                all_faces.append(end_faces[1])
-
-        # === 4. Create shell and solid using BRepBuilderAPI_Sewing ===
-        # Faces from different sections may not share exact edges, so we need
-        # to sew them together with a tolerance
-        from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid
-        from OCP.TopoDS import TopoDS
-        from OCP.TopAbs import TopAbs_SHELL, TopAbs_COMPOUND
-        from OCP.TopExp import TopExp_Explorer
-        from OCP.ShapeFix import ShapeFix_Shell, ShapeFix_Solid
-
-        sew = BRepBuilderAPI_Sewing(0.5)  # 0.5mm tolerance for sewing (faces don't share edges)
-        for face in all_faces:
-            if hasattr(face, "wrapped"):
-                sew.Add(face.wrapped)
-        sew.Perform()
-        sewn_shape = sew.SewedShape()
-
-        # Extract shell from sewn result
-        shell_ocp = None
-        shape_type = sewn_shape.ShapeType()
-
-        if shape_type == TopAbs_SHELL:
-            shell_ocp = TopoDS.Shell_s(sewn_shape)
-        elif shape_type == TopAbs_COMPOUND:
-            # Find first shell in compound
-            explorer = TopExp_Explorer(sewn_shape, TopAbs_SHELL)
-            if explorer.More():
-                shell_ocp = TopoDS.Shell_s(explorer.Current())
-
-        if shell_ocp is not None:
-            # Fix the shell
-            fix_shell = ShapeFix_Shell(shell_ocp)
-            fix_shell.Perform()
-            fixed_shell = fix_shell.Shell()
-
-            # Make solid from shell
-            try:
-                fix_solid = ShapeFix_Solid()
-                solid_ocp = fix_solid.SolidFromShell(fixed_shell)
-                thread_solid = cq.Solid(solid_ocp)
-
-                if thread_solid.isValid() and thread_solid.Volume() > 1.0:
-                    return thread_solid
-            except Exception:
-                pass
-
-            # Try BRepBuilderAPI_MakeSolid as fallback
-            try:
-                builder = BRepBuilderAPI_MakeSolid(fixed_shell)
-                if builder.IsDone():
-                    thread_solid = cq.Solid(builder.Solid())
-                    if thread_solid.isValid() and thread_solid.Volume() > 1.0:
-                        return thread_solid
-            except Exception:
-                pass
-
-        # Fallback: raw thread without fade
-        print("Warning: fade thread creation failed, falling back to raw thread")
-        thread_faces_raw, end_faces_raw = self.make_thread_faces(self.length, fade_helix=False)
-        all_raw_faces = thread_faces_raw + end_faces_raw
-        try:
-            thread_shell = cq.Shell.makeShell(all_raw_faces)
-            thread_solid = cq.Solid.makeSolid(thread_shell)
-            if thread_solid.isValid():
-                return thread_solid
-        except Exception:
-            pass
-
-        raise ValueError("Failed to create thread: faces did not form a valid shell")
-
-    def build(self) -> cq.Shape:
-        """Build the complete thread solid.
-
-        Uses the new faded ends approach when fade is requested, which creates
-        proper thread runout geometry. Falls back to raw thread with post-processing
-        for other end finishes (raw, square, chamfer).
-
-        Returns:
-            Thread solid as CadQuery Shape
-        """
-        start_finish, end_finish = self.end_finishes
-
-        # Use faded ends approach when fade or pipe_junction runout is requested
-        if "fade" in self.end_finishes or "pipe_junction" in self.end_finishes:
-            return self.make_thread_with_faded_ends()
-
-        # For non-fade finishes, use original approach with raw thread
-        thread_faces, end_faces = self.make_thread_faces(self.length, fade_helix=False)
-        all_faces = thread_faces + end_faces
-
-        # Create shell and solid using makeShell (simpler and more reliable)
-        try:
-            thread_shell = cq.Shell.makeShell(all_faces)
-            thread_solid = cq.Solid.makeSolid(thread_shell)
-
-            if not thread_solid.isValid():
-                raise ValueError("Shell.makeShell produced invalid solid")
-
-        except Exception:
-            # Fallback: use BRepBuilderAPI_Sewing for edge connectivity issues
-            from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing
-            from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_SHELL, TopAbs_SOLID
-            from OCP.TopExp import TopExp_Explorer
-
-            sew = BRepBuilderAPI_Sewing(1e-3)
-            for face in all_faces:
-                sew.Add(face.wrapped)
-            sew.Perform()
-
-            sewn_shape = sew.SewedShape()
-            shape_type = sewn_shape.ShapeType()
-
-            if shape_type == TopAbs_SHELL:
-                thread_shell = cq.Shell(sewn_shape)
-            elif shape_type == TopAbs_SOLID:
-                thread_solid = cq.Solid(sewn_shape)
-                if not thread_solid.isValid():
-                    raise ValueError("Thread solid is not valid") from None
-                thread_solid = self._apply_end_finishes(thread_solid, start_finish, end_finish)
-                return thread_solid
-            elif shape_type == TopAbs_COMPOUND:
-                explorer = TopExp_Explorer(sewn_shape, TopAbs_SHELL)
-                if explorer.More():
-                    thread_shell = cq.Shell(explorer.Current())
-                else:
-                    thread_shell = cq.Shell.makeShell([f for f in all_faces if isinstance(f, cq.Face)])
-            else:
-                thread_shell = cq.Shell.makeShell([f for f in all_faces if isinstance(f, cq.Face)])
-
-            thread_solid = cq.Solid.makeSolid(thread_shell)
-
-            if not thread_solid.isValid():
-                raise ValueError("Thread solid is not valid") from None
-
-        # Apply end finishes as post-processing (square, chamfer)
-        thread_solid = self._apply_end_finishes(thread_solid, start_finish, end_finish)
-
-        return thread_solid
-
-    def _apply_end_finishes(self, thread_solid: cq.Shape, start_finish: str, end_finish: str) -> cq.Shape:
-        """Apply end finishes (square, chamfer, fade) by trimming the raw thread."""
-        result = thread_solid
-
-        # Apply square finish (cuts at Z=0 and/or Z=length)
-        if start_finish == "square" or end_finish == "square":
-            result = self._apply_square_finish_internal(result, start_finish, end_finish)
-
-        # Apply chamfer finish
-        if start_finish == "chamfer" or end_finish == "chamfer":
-            result = self._apply_chamfer_finish(result)
-
-        # Apply fade finish (intersect with tapered profile)
-        if start_finish == "fade" or end_finish == "fade":
-            result = self._apply_fade_finish(result, start_finish, end_finish)
-
-        return result
-
-    def _apply_fade_finish(self, thread_solid: cq.Shape, start_finish: str, end_finish: str) -> cq.Shape:
-        """Apply fade finish.
-
-        Note: True geometric fade (gradual thread runout) requires complex geometry
-        that creates edge connectivity issues. For now, fade is treated as raw
-        (the helical threads naturally terminate at the boundaries).
-
-        The raw helix already provides reasonable thread termination - the threads
-        start and end at Z=0 and Z=length respectively.
-        """
-        # Return thread as-is - the raw helix provides adequate termination
-        # Cutting operations create Compounds which breaks the geometry
-        return thread_solid
-
-    def _apply_square_finish_internal(self, thread_solid: cq.Shape, start_finish: str, end_finish: str) -> cq.Shape:
-        """Apply square finish by cutting off thread at boundaries."""
-        taper_tan = math.tan(math.radians(self.taper)) if self.taper != 0 else 0.0
-        max_radius = max(self.apex_radius, self.root_radius) + self.length * taper_tan
-        box_size = 4 * max_radius
-        half_box = box_size / 2
-
-        result = thread_solid
-
-        if start_finish == "square":
-            cutter = cq.Solid.makeBox(box_size, box_size, self.length, cq.Vector(-half_box, -half_box, -self.length))
-            result = result.cut(cutter)
-
-        if end_finish == "square":
-            cutter = cq.Solid.makeBox(box_size, box_size, self.length, cq.Vector(-half_box, -half_box, self.length))
-            result = result.cut(cutter)
-
-        return result
-
-    def _apply_square_finish(self, thread_solid: cq.Shape) -> cq.Shape:
-        """Apply square finish by cutting off thread at boundaries."""
-        if "square" not in self.end_finishes:
-            return thread_solid
-
-        taper_tan = math.tan(math.radians(self.taper)) if self.taper != 0 else 0.0
-        max_radius = max(self.apex_radius, self.root_radius) + self.length * taper_tan
-        box_size = 4 * max_radius
-        half_box = box_size / 2
-
-        start_finish, end_finish = self.end_finishes
-        result = thread_solid
-
-        if start_finish == "square":
-            cutter = cq.Solid.makeBox(box_size, box_size, self.length, cq.Vector(-half_box, -half_box, -self.length))
-            result = result.cut(cutter)
-
-        if end_finish == "square":
-            cutter = cq.Solid.makeBox(box_size, box_size, self.length, cq.Vector(-half_box, -half_box, self.length))
-            result = result.cut(cutter)
-
-        return result
-
-    def _apply_chamfer_finish(self, thread_solid: cq.Shape) -> cq.Shape:
-        """Apply chamfer finish by intersecting with chamfered annular cylinder."""
-        if "chamfer" not in self.end_finishes:
-            return thread_solid
-
-        start_finish, end_finish = self.end_finishes
-        taper_tan = math.tan(math.radians(self.taper)) if self.taper != 0 else 0.0
-
-        apex_end = self.apex_radius + self.length * taper_tan
-        root_end = self.root_radius_adjusted + self.length * taper_tan
-
-        if self.external:
-            inner_r_start, outer_r_start = self.root_radius_adjusted, self.apex_radius
-            inner_r_end, outer_r_end = root_end, apex_end
-        else:
-            inner_r_start, outer_r_start = self.apex_radius, self.root_radius_adjusted
-            inner_r_end, outer_r_end = apex_end, root_end
-
-        try:
-            outer_cone = _make_tapered_cylinder(outer_r_start, outer_r_end, self.length)
-            inner_cone = _make_tapered_cylinder(inner_r_start, inner_r_end, self.length)
-            annular = outer_cone.cut(inner_cone)
-
-            cutter = cq.Workplane("XY").add(annular)
-
-            chamfer_length = self.tooth_height * 0.5
-            chamfer_depth = self.tooth_height * 0.75
-            edge_selector = 1 if self.external else 0
-
-            if start_finish == "chamfer":
-                cutter = cutter.faces("<Z").edges(cq.selectors.RadiusNthSelector(edge_selector)).chamfer(chamfer_length, chamfer_depth)
-
-            if end_finish == "chamfer":
-                cutter = cutter.faces(">Z").edges(cq.selectors.RadiusNthSelector(edge_selector)).chamfer(chamfer_length, chamfer_depth)
-
-            cutter_shape: cq.Shape = cutter.val()  # type: ignore[assignment]
-            return thread_solid.intersect(cutter_shape)
-
-        except Exception:
-            return thread_solid
-
-
-def _make_thread_solid(
-    apex_radius: float,
-    root_radius: float,
+def make_npt_thread_profile(
     pitch: float,
-    length: float,
-    taper_angle: float = 0.0,
-    external: bool = True,
-    end_finishes: tuple[str, str] = ("fade", "fade"),
-    blend_radius: float | None = None,
-    runout_turns: float = 0.25,
-) -> cq.Shape:
-    """Create thread solid using ruled surfaces between helical wires.
+    thread_depth: float,
+    at_radius: float,
+) -> cq.Workplane:
+    """Create truncated 60° V-profile for NPT thread groove.
 
-    This follows cq_warehouse's proven approach:
-    1. Create 4 helical wires (2 at apex, 2 at root) with Z-offsets for width
-    2. Connect wires with ruled surfaces to form thread flanks
-    3. Add end caps and fade sections as needed
-    4. Create shell and solid
+    The profile is a trapezoid representing the cross-section of the thread
+    groove to be cut from the pipe. For external threads, this is the material
+    removed by a threading die.
+
+    Profile geometry (per ASME B1.20.1):
+    - Thread depth: h = 0.8P
+    - Flank angle: 30° (60° included)
+    - Flat width at crest/root: F = 0.038P
+
+    The profile is created in a plane perpendicular to the helix at the start
+    point, with the groove opening facing inward (toward the pipe axis).
 
     Args:
-        apex_radius: Radius at thread crest (tips) at Z=0
-        root_radius: Radius at thread root (valleys) at Z=0
-        pitch: Thread pitch (mm)
-        length: Thread length (mm)
-        taper_angle: Helix taper half-angle in degrees (0 = no taper)
-        external: True for external threads (apex > root)
-        end_finishes: Tuple of (start_finish, end_finish) where each is:
-            - "raw": Unfinished thread extending beyond boundaries
-            - "fade": Thread profile fades to zero over the runout length
-            - "pipe_junction": Thread blends to blend_radius (pipe OD)
-            - "square": Clean cut at thread boundary
-            - "chamfer": Conical chamfer at thread ends
-        blend_radius: Target radius for "pipe_junction" fade (typically pipe OD)
-        runout_turns: Thread runout length in turns (default 0.25 = 90 degrees)
+        pitch: Thread pitch in mm
+        thread_depth: Thread depth (h = 0.8P) in mm
+        at_radius: Radius at which the profile apex (crest) is located
 
     Returns:
-        Thread solid as CadQuery Shape
+        CadQuery Workplane with closed wire profile
     """
-    try:
-        builder = ThreadBuilder(
-            apex_radius=apex_radius,
-            root_radius=root_radius,
-            pitch=pitch,
-            length=length,
-            taper_angle=taper_angle,
-            external=external,
-            end_finishes=end_finishes,
-            blend_radius=blend_radius,
-            runout_turns=runout_turns,
-        )
-        return builder.build()
+    # Calculate profile dimensions
+    flat_width = 0.038 * pitch
+    half_flat = flat_width / 2
 
-    except Exception as e:
-        # Fallback: simplified thread as tapered annulus
-        import traceback
+    # Flank angle is 30° from vertical
+    # The axial span of each flank = thread_depth * tan(30°)
+    flank_axial_span = thread_depth * math.tan(math.radians(30))
 
-        traceback.print_exc()
-        print(f"Thread creation failed: {e}, using simplified geometry")
+    # Profile points (in local YZ plane, will be positioned at radius)
+    # Y = axial direction (along helix), Z = radial direction (inward is negative)
+    # The groove cuts inward from the surface
+    points = [
+        (-half_flat, 0),  # Crest left (at surface)
+        (-half_flat - flank_axial_span, -thread_depth),  # Root left
+        (half_flat + flank_axial_span, -thread_depth),  # Root right
+        (half_flat, 0),  # Crest right (at surface)
+    ]
 
-        taper_tan = math.tan(math.radians(taper_angle)) if taper_angle != 0 else 0.0
-        r_apex_end = apex_radius + length * taper_tan
-        r_root_end = root_radius + length * taper_tan
+    # Create the profile in YZ plane, positioned at the radius
+    profile = (
+        cq.Workplane("YZ")
+        .transformed(offset=(at_radius, 0, 0))
+        .polyline(points)
+        .close()
+    )
 
-        outer = _make_tapered_cylinder(max(apex_radius, root_radius), max(r_apex_end, r_root_end), length)
-        inner = _make_tapered_cylinder(min(apex_radius, root_radius), min(r_apex_end, r_root_end), length)
-        return outer.cut(inner)
+    return profile
 
 
-def make_npt_external_thread_grooves(
+def make_tapered_pipe_end(
     nps: str,
-    thread_length: float | None = None,
+    thread_length: float,
+    pipe_id: float | None = None,
 ) -> cq.Shape:
-    """Create external NPT thread geometry for CUTTING from a pipe.
+    """Create pipe end with NPT taper at major thread diameter.
 
-    IMPORTANT: This is a WORKAROUND function. The proper way to add external
-    threads to a pipe is to create the thread solid and FUSE it, not cut.
-
-    For external threads, the thread ridges project OUTWARD from the pipe body.
-    The pipe OD becomes the thread root, and the crests are at a larger radius.
-
-    For now, this returns a tapered annular volume that represents the thread
-    envelope (minor to major diameter). This should be CUT from a plain pipe
-    to create a stepped appearance, but proper helical threads require FUSING
-    the thread solid onto the pipe.
+    The taper follows NPT specifications:
+    - Z=0: Pipe free end (smallest diameter)
+    - Z=thread_length: Pipe junction (largest diameter = pipe OD)
+    - Taper ratio: 1:16 (diameter change per unit length)
 
     Args:
-        nps: Nominal pipe size (e.g., "1/2", "1", "2")
-        thread_length: Length of thread in mm. Defaults to L2 (effective thread length).
+        nps: Nominal pipe size
+        thread_length: Length of tapered section in mm
+        pipe_id: Inner diameter for hollow pipe (optional)
 
     Returns:
-        CadQuery Shape representing thread envelope for cutting
+        Tapered cone or hollow frustum
     """
     spec = get_npt_spec(nps)
 
-    if thread_length is None:
-        thread_length = spec.L2
+    # At Z=0 (small end / free end)
+    # The major diameter is smaller by the taper amount
+    taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
+    major_radius_small = spec.od / 2.0 - taper_delta
 
+    # At Z=thread_length (large end / into pipe body)
+    major_radius_large = spec.od / 2.0
+
+    # Create tapered outer surface
+    outer = _make_tapered_cylinder(major_radius_small, major_radius_large, thread_length)
+
+    # If hollow, subtract bore
+    if pipe_id is not None and pipe_id > 0:
+        bore_radius = pipe_id / 2.0
+        bore = cq.Solid.makeCylinder(bore_radius, thread_length)
+        return outer.cut(bore)
+
+    return outer
+
+
+def make_npt_thread_cutter(
+    nps: str,
+    thread_length: float,
+) -> cq.Shape:
+    """Create helical V-groove cutting tool for external NPT threads.
+
+    The cutter is a solid representing the material to REMOVE from
+    a tapered pipe end to create external threads. Created by lofting
+    between inner and outer helix edges with V-groove cross-sections.
+
+    Orientation:
+    - Axis along +Z
+    - Z=0 is the small end (pipe free end)
+    - Z=thread_length is the large end (into pipe body)
+    - NPT taper: radius increases with Z
+
+    Args:
+        nps: Nominal pipe size
+        thread_length: Length of threaded section in mm
+
+    Returns:
+        Solid representing the cutting tool geometry
+    """
+    spec = get_npt_spec(nps)
+    pitch = spec.pitch_mm
     thread_depth = spec.thread_depth
 
-    # For external threads going INTO the pipe body:
-    # Z=0 is pipe end (LARGEST diameter), Z=thread_length is smaller
-    # At Z=0: major = OD, minor = OD - thread_depth
-    # Taper decreases as we go into the pipe
-
-    r_major_start = spec.od / 2.0
-    r_minor_start = r_major_start - thread_depth
-
+    # Calculate radii at the small end (Z=0)
     taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
-    r_major_end = r_major_start - taper_delta
-    r_minor_end = r_minor_start - taper_delta
+    major_radius_at_small = spec.od / 2.0 - taper_delta
+    root_radius_at_small = major_radius_at_small - thread_depth
 
-    # Return envelope (annular taper) - this is what gets removed in threading
-    # Actually for external threads we don't cut - we add material
-    # But for hollow pipes, we can represent the threaded section by having
-    # the OD at major diameter with grooves cut in
+    # Thread profile dimensions
+    flat_width = 0.038 * pitch
+    half_flat = flat_width / 2
+    flank_axial_span = thread_depth * math.tan(math.radians(30))
 
-    outer = _make_tapered_cylinder(r_major_start, r_major_end, thread_length)
-    inner = _make_tapered_cylinder(r_minor_start, r_minor_end, thread_length)
-    return outer.cut(inner)
+    # Calculate number of thread turns
+    num_turns = thread_length / pitch
+
+    # Create thread groove solid by building cross-sections and lofting
+    # Each cross-section is a V-groove profile at a specific angle around the helix
+    num_sections = max(int(num_turns * 36), 36)  # At least 36 sections, ~10° apart
+
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+    from OCP.gp import gp_Pnt, gp_Vec, gp_Ax2, gp_Dir
+    from OCP.GC import GC_MakeArcOfCircle
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
+
+    loft = BRepOffsetAPI_ThruSections(True, False)  # solid=True, ruled=False
+
+    for i in range(num_sections + 1):
+        t = i / num_sections
+        z = t * thread_length
+        angle = t * num_turns * 2 * math.pi  # Angle around helix
+
+        # Radius at this Z position (NPT taper)
+        taper_offset = z * NPT_TAPER_RATIO / 2.0
+        major_r = major_radius_at_small + taper_offset
+        root_r = major_r - thread_depth
+
+        # Surface extension for clean cuts
+        outer_r = major_r + 0.3
+
+        # Profile center position (in XY plane at angle)
+        cx = math.cos(angle)
+        cy = math.sin(angle)
+
+        # Create V-groove profile points (4 corners of trapezoid)
+        # The V-groove is WIDE at the surface (outer_r) and NARROW at the root (root_r)
+        # This matches how a threading die cuts - wide opening, narrow bottom
+
+        # Outer edge (at pipe surface) - WIDE span
+        z_outer_top = z - half_flat - flank_axial_span
+        z_outer_bot = z + half_flat + flank_axial_span
+
+        # Inner edge (at root) - NARROW span (just the flat)
+        z_root_top = z - half_flat
+        z_root_bot = z + half_flat
+
+        pts = [
+            gp_Pnt(cx * outer_r, cy * outer_r, z_outer_top),
+            gp_Pnt(cx * outer_r, cy * outer_r, z_outer_bot),
+            gp_Pnt(cx * root_r, cy * root_r, z_root_bot),
+            gp_Pnt(cx * root_r, cy * root_r, z_root_top),
+        ]
+
+        # Build wire from points
+        wire_builder = BRepBuilderAPI_MakeWire()
+        for j in range(4):
+            edge = BRepBuilderAPI_MakeEdge(pts[j], pts[(j + 1) % 4]).Edge()
+            wire_builder.Add(edge)
+
+        wire = wire_builder.Wire()
+        loft.AddWire(wire)
+
+    loft.Build()
+    if not loft.IsDone():
+        raise ValueError("Failed to create thread cutter loft")
+
+    return cq.Shape(loft.Shape())
+
+
+def make_npt_runout_cutter(
+    nps: str,
+    runout_turns: float = 0.25,
+    z_offset: float = 0.0,
+) -> cq.Shape | None:
+    """Create fading runout section where thread depth decreases to zero.
+
+    The runout creates a smooth transition from full thread to pipe surface
+    using the same lofting approach as the main cutter but with decreasing depth.
+
+    Args:
+        nps: Nominal pipe size
+        runout_turns: Runout length in thread turns (default 0.25 = 90°)
+        z_offset: Z position where runout starts
+
+    Returns:
+        Solid representing the runout cutter, or None if runout too short
+    """
+    spec = get_npt_spec(nps)
+    pitch = spec.pitch_mm
+    thread_depth = spec.thread_depth
+    runout_length = pitch * runout_turns
+
+    if runout_length < 0.5:  # Too short for meaningful runout
+        return None
+
+    # Thread profile dimensions
+    flat_width = 0.038 * pitch
+    half_flat = flat_width / 2
+
+    # Calculate starting angle (continuing from main thread)
+    main_thread_turns = z_offset / pitch
+    start_angle = main_thread_turns * 2 * math.pi
+
+    try:
+        from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+        from OCP.gp import gp_Pnt
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
+
+        num_sections = max(int(runout_turns * 36), 12)
+        loft = BRepOffsetAPI_ThruSections(True, False)
+
+        for i in range(num_sections + 1):
+            t = i / num_sections
+            local_z = t * runout_length
+            z = z_offset + local_z
+            angle = start_angle + t * runout_turns * 2 * math.pi
+
+            # Fade factor: 1.0 at start, 0.0 at end
+            fade = 1.0 - t
+            current_depth = thread_depth * fade
+            if current_depth < 0.1:
+                current_depth = 0.1  # Minimum depth
+
+            flank_span = current_depth * math.tan(math.radians(30))
+
+            # Radius at this Z position
+            taper_per_z = NPT_TAPER_RATIO / 2.0
+            major_r = spec.od / 2.0 - ((spec.L2 - z) * taper_per_z)
+            root_r = major_r - current_depth
+            outer_r = major_r + 0.3
+
+            cx = math.cos(angle)
+            cy = math.sin(angle)
+
+            # V-groove: WIDE at surface, NARROW at root
+            z_outer_top = z - half_flat - flank_span
+            z_outer_bot = z + half_flat + flank_span
+            z_root_top = z - half_flat
+            z_root_bot = z + half_flat
+
+            pts = [
+                gp_Pnt(cx * outer_r, cy * outer_r, z_outer_top),
+                gp_Pnt(cx * outer_r, cy * outer_r, z_outer_bot),
+                gp_Pnt(cx * root_r, cy * root_r, z_root_bot),
+                gp_Pnt(cx * root_r, cy * root_r, z_root_top),
+            ]
+
+            wire_builder = BRepBuilderAPI_MakeWire()
+            for j in range(4):
+                edge = BRepBuilderAPI_MakeEdge(pts[j], pts[(j + 1) % 4]).Edge()
+                wire_builder.Add(edge)
+
+            loft.AddWire(wire_builder.Wire())
+
+        loft.Build()
+        if loft.IsDone():
+            return cq.Shape(loft.Shape())
+
+    except Exception:
+        pass
+
+    return None
+
+
+def make_pipe_end_chamfer(
+    major_radius: float,
+    thread_depth: float,
+    chamfer_angle: float = 30.0,
+) -> cq.Solid:
+    """Create 30° chamfer at pipe free end for thread entry.
+
+    The chamfer removes material at the pipe tip to:
+    1. Allow easy thread engagement
+    2. Remove the sharp thread crest at the entry
+    3. Match standard manufacturing practice
+
+    Args:
+        major_radius: Major thread radius at Z=0 (pipe free end)
+        thread_depth: Thread depth (determines chamfer depth)
+        chamfer_angle: Angle from horizontal (default 30° for 60° thread)
+
+    Returns:
+        Solid representing material to remove for chamfer
+    """
+    # Chamfer depth is approximately the thread depth
+    chamfer_depth = thread_depth * 1.2  # Slightly deeper than thread
+
+    # Chamfer height based on angle
+    chamfer_height = chamfer_depth / math.tan(math.radians(chamfer_angle))
+
+    # The chamfer is the volume between:
+    # - A cone from major_radius at Z=0 to (major_radius - chamfer_depth) at Z=chamfer_height
+    # - Extended below Z=0 to fully cut the edge
+    chamfer = cq.Solid.makeCone(
+        radius1=major_radius,
+        radius2=major_radius - chamfer_depth,
+        height=chamfer_height,
+        pnt=cq.Vector(0, 0, 0),
+        dir=cq.Vector(0, 0, 1),
+    )
+
+    return chamfer
+
+
+# =============================================================================
+# MAIN API FUNCTIONS
+# =============================================================================
 
 
 def make_npt_external_thread(
@@ -1164,203 +615,108 @@ def make_npt_external_thread(
     thread_length: float | None = None,
     simple: bool = False,
     pipe_id: float | None = None,
-    end_finishes: tuple[str, str] = ("fade", "fade"),
-    blend_radius: float | None = None,
+    end_finishes: tuple[str, str] = ("chamfer", "fade"),
     runout_turns: float = 0.25,
-    method: str = "additive",
 ) -> cq.Shape:
-    """Create external NPT thread geometry for a pipe end.
+    """Create external NPT thread geometry using die-cut approach.
 
-    The thread is oriented with:
+    The die-cut method:
+    1. Creates a tapered pipe end at major thread diameter
+    2. Creates a helical V-groove cutting tool
+    3. Subtracts the cutter from the pipe to form threads
+    4. Adds gradual runout fade at pipe junction end
+    5. Adds entry chamfer at free end
+
+    Orientation:
     - Axis along +Z
-    - Z=0 is the pipe end (free end) - SMALLEST diameter (canonical orientation)
-    - Thread extends in +Z direction (into the pipe body)
-    - Diameter INCREASES as Z increases (natural helix taper direction)
-
-    For external threads on a pipe:
-    - Thread crests (apex) are at the pipe OD
-    - Thread roots (valleys) are cut into the pipe wall
-    - The result is a HOLLOW threaded section (if pipe_id is provided)
+    - Z=0 is the pipe free end (smallest diameter)
+    - Z=thread_length is the pipe junction (largest diameter)
+    - Diameter INCREASES as Z increases (NPT taper)
 
     Args:
         nps: Nominal pipe size (e.g., "1/2", "1", "2")
-        thread_length: Length of thread in mm. Defaults to L2 (effective thread length).
-        simple: If True, return simplified representation (tapered cylinder envelope)
-        pipe_id: Inner diameter of pipe (for hollow threaded section). If None, solid.
-        end_finishes: Tuple of (start_finish, end_finish) where each is:
-            - "raw": Unfinished thread extending beyond boundaries (fastest)
-            - "fade": Thread profile fades to zero over the runout length (default)
-            - "pipe_junction": Thread profile blends to blend_radius at the pipe junction
-            - "square": Clean cut at thread boundary (moderate)
-            - "chamfer": Conical chamfer at thread ends (slowest)
-        blend_radius: Target radius for "pipe_junction" fade. Defaults to pipe OD / 2.
-        runout_turns: Thread runout length in turns (default 0.25 = 90 degrees).
-        method: "additive" (core + teeth) or "die_cut" (cut inverse grooves from OD).
+        thread_length: Thread length in mm (defaults to L2)
+        simple: If True, return simplified envelope geometry (no threads)
+        pipe_id: Inner diameter for hollow pipe
+        end_finishes: Tuple of (free_end, pipe_junction_end):
+            - "fade": Thread fades to surface level
+            - "chamfer": Add entry chamfer (default for free end)
+            - "raw": No special treatment
+        runout_turns: Fade length in thread turns (default 0.25 = 90°)
 
     Returns:
-        CadQuery Shape of the threaded section
+        CadQuery Shape of the threaded pipe section
     """
     spec = get_npt_spec(nps)
 
     if thread_length is None:
         thread_length = spec.L2
 
-    thread_depth = spec.thread_depth
     pitch = spec.pitch_mm
-    start_finish, end_finish = end_finishes
-    blend_radius_value = blend_radius
-    if end_finish == "pipe_junction" and blend_radius_value is None:
-        blend_radius_value = spec.od / 2.0
-
-    # For external threads:
-    # - Apex (crest) radius = pipe OD / 2 (crests at pipe surface)
-    # - Root radius = apex - thread_depth (valleys cut into pipe wall)
-    # - NPT taper: diameter DECREASES as we go INTO the pipe (+Z direction)
-
-    # At Z=0 (pipe free end - LARGEST diameter)
-    apex_radius_start = spec.od / 2.0
-    root_radius_start = apex_radius_start - thread_depth
-
-    # At Z=thread_length (smaller due to NPT taper)
-    taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
-    apex_radius_end = apex_radius_start - taper_delta
-    root_radius_end = root_radius_start - taper_delta
-
-    # Bore radius (default to solid if not specified)
-    bore_radius = pipe_id / 2.0 if pipe_id is not None else 0.0
+    thread_depth = spec.thread_depth
+    free_end_finish, junction_end_finish = end_finishes
 
     if simple:
-        # Simplified: tapered annular section (thread envelope)
-        outer_cone = _make_tapered_cylinder(apex_radius_start, apex_radius_end, thread_length)
-        if bore_radius > 0:
-            bore = cq.Solid.makeCylinder(bore_radius, thread_length)
-            return outer_cone.cut(bore)
-        return outer_cone
+        return make_tapered_pipe_end(nps, thread_length, pipe_id)
 
-    # Full thread geometry using ruled surface approach
-    # The thread solid from _make_thread_solid is just the teeth (root to apex)
-    # We also need a "core" cylinder from bore to root level
-    #
-    # CANONICAL ORIENTATION (caller must flip for specific end):
-    # - Z=0: SMALL end (thread diameter is smallest here)
-    # - Z=thread_length: LARGE end (thread diameter is largest here)
-    # This matches the natural direction of positive taper (expanding with +Z)
+    # Step 1: Create blank tapered pipe end
+    pipe_blank = make_tapered_pipe_end(nps, thread_length, pipe_id)
 
+    # Step 2: Determine main cutter length (reserve space for runout if needed)
+    runout_length = pitch * runout_turns if junction_end_finish == "fade" else 0
+    main_cutter_length = thread_length - runout_length
+
+    if main_cutter_length < pitch:
+        # Thread too short for proper runout, use full length
+        main_cutter_length = thread_length
+        runout_length = 0
+
+    # Step 3: Create main thread cutting tool
     try:
-        if method == "die_cut":
-            # Build a groove cutter (inverse of the male thread) and cut from OD.
-            groove_cutter = _make_thread_solid(
-                apex_radius=root_radius_end,  # Smallest radius = root
-                root_radius=apex_radius_start,  # Limit crest to pipe OD
-                pitch=pitch,
-                length=thread_length,
-                taper_angle=NPT_HALF_ANGLE_DEG,
-                external=False,
-                end_finishes=("raw", "raw"),
-                runout_turns=runout_turns,
-            )
-
-            outer_taper = _make_tapered_cylinder(apex_radius_end, apex_radius_start, thread_length)
-
-            mask_blend_radius = blend_radius_value
-            if end_finish == "pipe_junction" and mask_blend_radius is not None:
-                # Avoid zero-thickness mask at the junction (outer/core coincide).
-                mask_blend_radius = max(mask_blend_radius - 1e-3, root_radius_end + 1e-4)
-
-            core_shrink = 1e-3
-            core_runout = _make_external_thread_core(
-                root_radius_small=root_radius_end - core_shrink,
-                root_radius_large=root_radius_start - core_shrink,
-                thread_length=thread_length,
-                pitch=pitch,
-                bore_radius=0.0,
-                end_finish=end_finish,
-                blend_radius=mask_blend_radius,
-                runout_turns=runout_turns,
-            )
-
-            mask = outer_taper.cut(core_runout)
-            groove_masked = groove_cutter.intersect(mask)
-            if _extract_largest_solid(groove_masked) is None:
-                # Retry with fuzzy booleans when exact ops fail.
-                mask = _cut_with_fuzzy(outer_taper, core_runout) or mask
-                groove_masked = _intersect_with_fuzzy(groove_cutter, mask) or groove_cutter.intersect(mask)
-
-            threaded_section = outer_taper.cut(groove_masked)
-
-            if bore_radius > 0:
-                bore = cq.Solid.makeCylinder(bore_radius, thread_length)
-                threaded_section = _cut_with_fuzzy(threaded_section, bore) or threaded_section.cut(bore)
-
-            if threaded_section.isValid():
-                return threaded_section
-            raise ValueError("Die-cut thread creation failed")
-
-        # Create thread teeth starting at SMALL end with POSITIVE taper
-        teeth_end_finishes = end_finishes
-        if end_finish == "pipe_junction":
-            # Use a raw end for teeth; the core handles the junction runout.
-            teeth_end_finishes = (start_finish, "raw")
-
-        thread_teeth = _make_thread_solid(
-            apex_radius=apex_radius_end,  # Start at small end
-            root_radius=root_radius_end,
-            pitch=pitch,
-            length=thread_length,
-            taper_angle=NPT_HALF_ANGLE_DEG,  # POSITIVE = expanding as Z increases
-            external=True,
-            end_finishes=teeth_end_finishes,
-            blend_radius=blend_radius_value,
-            runout_turns=runout_turns,
-        )
-
-        # Create core cylinder from bore to root (tapered, small to large).
-        # For pipe_junction, expand core to pipe OD only over the runout length.
-        core = _make_external_thread_core(
-            root_radius_small=root_radius_end,
-            root_radius_large=root_radius_start,
-            thread_length=thread_length,
-            pitch=pitch,
-            bore_radius=bore_radius,
-            end_finish=end_finish,
-            blend_radius=blend_radius_value,
-            runout_turns=runout_turns,
-        )
-        threaded_section = core.fuse(thread_teeth)
-        try:
-            core_volume = core.Volume()
-            teeth_volume = thread_teeth.Volume()
-            fused_volume = threaded_section.Volume()
-            if fused_volume <= core_volume + teeth_volume * 0.05:
-                # Union likely failed to merge teeth; try a fuzzy fuse for a single solid.
-                fused = _fuse_with_fuzzy(core, thread_teeth)
-                if fused is not None:
-                    return fused
-                return cq.Compound.makeCompound([core, thread_teeth])
-        except Exception:
-            fused = _fuse_with_fuzzy(core, thread_teeth)
-            if fused is not None:
-                return fused
-            return cq.Compound.makeCompound([core, thread_teeth])
-
-        # NO FLIP HERE - return in canonical orientation
-        # Caller (make_threaded_pipe) will flip as needed for each end:
-        # - Inlet: flip so LARGE end is at Z=0 (free end)
-        # - Outlet: no flip needed, position so LARGE end is at Z=length
-
-        if threaded_section.isValid():
-            return threaded_section
-        else:
-            raise ValueError("Thread creation failed")
-
+        thread_cutter = make_npt_thread_cutter(nps, main_cutter_length)
     except Exception as e:
-        # Fallback to simplified geometry
-        print(f"Thread creation failed: {e}, using simplified geometry")
-        outer_cone = _make_tapered_cylinder(apex_radius_start, apex_radius_end, thread_length)
-        if bore_radius > 0:
-            bore = cq.Solid.makeCylinder(bore_radius, thread_length)
-            return outer_cone.cut(bore)
-        return outer_cone
+        print(f"Warning: Thread cutter creation failed: {e}, returning simplified geometry")
+        return make_tapered_pipe_end(nps, thread_length, pipe_id)
+
+    # Step 4: Create runout section with fading depth
+    full_cutter = thread_cutter
+    if runout_length > 0 and junction_end_finish == "fade":
+        runout_cutter = make_npt_runout_cutter(
+            nps=nps,
+            runout_turns=runout_turns,
+            z_offset=main_cutter_length,
+        )
+        if runout_cutter is not None:
+            try:
+                full_cutter = thread_cutter.fuse(runout_cutter)
+            except Exception:
+                # Keep just the main cutter if fuse fails
+                pass
+
+    # Step 5: Cut threads from pipe blank
+    try:
+        threaded_pipe = pipe_blank.cut(full_cutter)
+    except Exception as e:
+        print(f"Warning: Thread cutting failed: {e}, returning simplified geometry")
+        return make_tapered_pipe_end(nps, thread_length, pipe_id)
+
+    # Step 6: Add entry chamfer if requested
+    if free_end_finish == "chamfer":
+        taper_delta = thread_length * NPT_TAPER_RATIO / 2.0
+        major_radius_at_free_end = spec.od / 2.0 - taper_delta
+        chamfer = make_pipe_end_chamfer(major_radius_at_free_end, thread_depth)
+        try:
+            threaded_pipe = threaded_pipe.cut(chamfer)
+        except Exception:
+            # Skip chamfer if cut fails
+            pass
+
+    # Validate result
+    if not threaded_pipe.isValid():
+        print("Warning: Threaded pipe is invalid, returning simplified geometry")
+        return make_tapered_pipe_end(nps, thread_length, pipe_id)
+
+    return threaded_pipe
 
 
 def make_npt_internal_thread(
@@ -1369,7 +725,7 @@ def make_npt_internal_thread(
     simple: bool = False,
     end_finishes: tuple[str, str] = ("fade", "fade"),
 ) -> cq.Shape:
-    """Create internal NPT thread geometry for a fitting bore.
+    """Create internal NPT thread geometry (bore volume to cut from fitting).
 
     The thread is oriented with:
     - Axis along +Z
@@ -1383,17 +739,12 @@ def make_npt_internal_thread(
     - The NPT taper means diameter INCREASES going into the fitting
 
     This function returns the BORE VOLUME to be CUT from the fitting.
-    The bore = base bore at apex level + thread grooves to root level.
 
     Args:
         nps: Nominal pipe size (e.g., "1/2", "1", "2")
         thread_length: Length of thread in mm. Defaults to L2 (effective thread length).
         simple: If True, return simplified representation (tapered cylinder bore)
-        end_finishes: Tuple of (start_finish, end_finish) where each is:
-            - "raw": Unfinished thread
-            - "fade": Thread profile fades smoothly (default)
-            - "square": Clean cut at thread boundary
-            - "chamfer": Conical chamfer at thread ends
+        end_finishes: Tuple of (start_finish, end_finish) - currently unused
 
     Returns:
         CadQuery Shape representing the material to CUT from the fitting
@@ -1424,158 +775,65 @@ def make_npt_internal_thread(
         # Simplified: tapered cylinder at root (major) diameter
         return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
 
-    # Full thread geometry:
-    # Internal threads form grooves that extend from apex (crest) to root (valley)
-    # The bore volume = base bore (at apex level) + thread grooves (apex to root)
+    # For internal threads, create helical groove that projects outward
+    # The cutter represents the thread ridges projecting into the bore
+
+    # Create tapered helix at apex radius
+    helix_wire = cq.Wire.makeHelix(
+        pitch=pitch,
+        height=thread_length,
+        radius=apex_radius_start,
+        angle=NPT_HALF_ANGLE_DEG,
+        lefthand=False,
+    )
+
+    # Profile for internal threads: groove projects outward (positive X)
+    flat_width = 0.038 * pitch
+    half_flat = flat_width / 2
+    flank_axial_span = thread_depth * math.tan(math.radians(30))
+
+    profile = (
+        cq.Workplane("XZ")
+        .transformed(offset=(apex_radius_start, 0, 0))
+        .polyline([
+            (0, -half_flat),
+            (thread_depth, -half_flat - flank_axial_span),
+            (thread_depth, half_flat + flank_axial_span),
+            (0, half_flat),
+        ])
+        .close()
+    )
 
     try:
-        # Create thread teeth (the grooves from apex to root)
-        # For internal threads, the taper naturally expands with +Z (positive angle)
-        thread_teeth = _make_thread_solid(
-            apex_radius=apex_radius_start,
-            root_radius=root_radius_start,
-            pitch=pitch,
-            length=thread_length,
-            taper_angle=NPT_HALF_ANGLE_DEG,  # Positive = expanding (correct for internal)
-            external=False,  # Internal thread
-            end_finishes=end_finishes,
-        )
+        helix_path = cq.Workplane("XY").add(helix_wire)
+        thread_ridges = profile.sweep(helix_path, isFrenet=True)
 
-        # Create base bore cylinder at apex level (the main bore opening)
+        # Base bore at apex level
         base_bore = _make_tapered_cylinder(apex_radius_start, apex_radius_end, thread_length)
 
-        # Fuse base bore with thread teeth to get complete bore volume
-        threaded_bore = base_bore.fuse(thread_teeth)
+        # Fuse ridges with base bore to get complete bore volume
+        ridge_solid = thread_ridges.val()
+        if isinstance(ridge_solid, (cq.Solid, cq.Shape)):
+            threaded_bore = base_bore.fuse(ridge_solid)
+        else:
+            solids = thread_ridges.solids().vals()
+            if solids:
+                first_solid = solids[0]
+                if isinstance(first_solid, cq.Shape):
+                    threaded_bore = base_bore.fuse(first_solid)
+                else:
+                    return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
+            else:
+                return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
 
         if threaded_bore.isValid():
             return threaded_bore
-        else:
-            raise ValueError("Internal thread creation failed")
 
     except Exception as e:
-        # Fallback to simplified geometry
         print(f"Internal thread creation failed: {e}, using simplified geometry")
-        return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
 
-
-def _make_tapered_cylinder(radius_start: float, radius_end: float, height: float) -> cq.Shape:
-    """Create a tapered cylinder (truncated cone).
-
-    Args:
-        radius_start: Radius at Z=0
-        radius_end: Radius at Z=height
-        height: Height of cylinder
-
-    Returns:
-        CadQuery Shape of the tapered cylinder
-    """
-    return cq.Solid.makeCone(
-        radius1=radius_start,
-        radius2=radius_end,
-        height=height,
-        pnt=cq.Vector(0, 0, 0),
-        dir=cq.Vector(0, 0, 1),
-    )
-
-
-def _extract_largest_solid(shape: cq.Shape) -> cq.Solid | None:
-    """Extract the largest solid from a shape or compound."""
-    from OCP.TopAbs import TopAbs_SOLID
-    from OCP.TopExp import TopExp_Explorer
-
-    if isinstance(shape, cq.Solid):
-        return shape
-    wrapped = shape.wrapped if hasattr(shape, "wrapped") else shape
-    explorer = TopExp_Explorer(wrapped, TopAbs_SOLID)
-    solids: list[cq.Solid] = []
-    while explorer.More():
-        solids.append(cq.Solid(explorer.Current()))
-        explorer.Next()
-    if not solids:
-        return None
-    return max(solids, key=lambda s: s.Volume())
-
-
-def _fuse_with_fuzzy(shape_a: cq.Shape, shape_b: cq.Shape, fuzzy: float = 1e-3) -> cq.Shape | None:
-    """Fuse two shapes with a fuzzy tolerance to improve boolean robustness."""
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
-
-    fused = BRepAlgoAPI_Fuse(shape_a.wrapped, shape_b.wrapped)
-    fused.SetFuzzyValue(fuzzy)
-    fused.Build()
-    if not fused.IsDone():
-        return None
-    result = cq.Shape(fused.Shape())
-    solid = _extract_largest_solid(result)
-    return solid if solid is not None else result
-
-
-def _cut_with_fuzzy(shape: cq.Shape, tool: cq.Shape, fuzzy: float = 1e-3) -> cq.Shape | None:
-    """Cut one shape from another with a fuzzy tolerance."""
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
-
-    cut = BRepAlgoAPI_Cut(shape.wrapped, tool.wrapped)
-    cut.SetFuzzyValue(fuzzy)
-    cut.Build()
-    if not cut.IsDone():
-        return None
-    result = cq.Shape(cut.Shape())
-    solid = _extract_largest_solid(result)
-    return solid if solid is not None else result
-
-
-def _intersect_with_fuzzy(shape: cq.Shape, tool: cq.Shape, fuzzy: float = 1e-3) -> cq.Shape | None:
-    """Intersect two shapes with a fuzzy tolerance."""
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
-
-    common = BRepAlgoAPI_Common(shape.wrapped, tool.wrapped)
-    common.SetFuzzyValue(fuzzy)
-    common.Build()
-    if not common.IsDone():
-        return None
-    result = cq.Shape(common.Shape())
-    solid = _extract_largest_solid(result)
-    return solid if solid is not None else None
-
-
-def _make_external_thread_core(
-    root_radius_small: float,
-    root_radius_large: float,
-    thread_length: float,
-    pitch: float,
-    bore_radius: float,
-    end_finish: str,
-    blend_radius: float | None,
-    runout_turns: float,
-) -> cq.Shape:
-    """Create the external thread core, expanding to pipe OD for pipe_junction runout."""
-    if end_finish == "pipe_junction":
-        if blend_radius is None:
-            raise ValueError("blend_radius must be set for pipe_junction core")
-        runout_length = min(pitch * runout_turns, thread_length)
-        runout_start_z = thread_length - runout_length
-        taper_per_length = NPT_TAPER_RATIO / 2.0
-        root_radius_runout_start = root_radius_small + runout_start_z * taper_per_length
-
-        core_sections: list[cq.Shape] = []
-        if runout_start_z > 0:
-            core_sections.append(
-                _make_tapered_cylinder(root_radius_small, root_radius_runout_start, runout_start_z)
-            )
-        runout_section = _make_tapered_cylinder(
-            root_radius_runout_start, blend_radius, runout_length
-        ).translate(cq.Vector(0, 0, runout_start_z))
-        core_sections.append(runout_section)
-
-        core = core_sections[0] if len(core_sections) == 1 else core_sections[0].fuse(core_sections[1])
-    else:
-        core = _make_tapered_cylinder(root_radius_small, root_radius_large, thread_length)
-
-    if bore_radius > 0:
-        bore = cq.Solid.makeCylinder(bore_radius, thread_length)
-        core = core.cut(bore)
-
-    return core
+    # Fallback to simplified geometry
+    return _make_tapered_cylinder(root_radius_start, root_radius_end, thread_length)
 
 
 # =============================================================================
@@ -1668,8 +926,8 @@ def export_thread_assembly(
         depth = spec.wrench_tight_engagement
 
     # Create threads
-    external = make_npt_external_thread(nps, simple=True)
-    internal = make_npt_internal_thread(nps, simple=True)
+    external = make_npt_external_thread(nps, simple=False)
+    internal = make_npt_internal_thread(nps, simple=False)
 
     # Create housing for internal thread (cylinder with bore)
     housing_od = spec.od * 1.5  # Larger than pipe OD
@@ -1686,7 +944,7 @@ def export_thread_assembly(
 
 
 if __name__ == "__main__":
-    print("NPT Thread Generator")
+    print("NPT Thread Generator (Die-Cut Approach)")
     print("=" * 40)
 
     # Print specs for common sizes
