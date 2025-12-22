@@ -1095,8 +1095,8 @@ def make_threaded_elbow_90_fitting(nps: str, units: str = "mm") -> Fitting:  # n
     A = dims.center_to_end  # Center to thread end
     thread_engagement = thread_spec.engagement  # How far pipe screws in
 
-    # Get elbow shape
-    elbow_shape = make_threaded_elbow_90(nps)
+    # Get elbow shape with threads
+    elbow_shape = make_threaded_elbow_90(nps, include_threads=True)
 
     # Port position: where pipe tip ends up after threading in
     # Port is at center_to_end minus thread engagement
@@ -1148,8 +1148,8 @@ def make_threaded_elbow_45_fitting(nps: str, units: str = "mm") -> Fitting:  # n
     A = dims.center_to_end  # Center to thread end
     thread_engagement = thread_spec.engagement
 
-    # Get elbow shape
-    elbow_shape = make_threaded_elbow_45(nps)
+    # Get elbow shape with threads
+    elbow_shape = make_threaded_elbow_45(nps, include_threads=True)
 
     # Port position accounting for thread engagement
     port_offset = A - thread_engagement
@@ -1213,8 +1213,8 @@ def make_threaded_tee_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: 
     A = dims.center_to_end  # Center to thread end
     thread_engagement = thread_spec.engagement
 
-    # Get tee shape
-    tee_shape = make_threaded_tee(nps)
+    # Get tee shape with threads
+    tee_shape = make_threaded_tee(nps, include_threads=True)
 
     # Port position accounting for thread engagement
     port_offset = A - thread_engagement
@@ -1310,6 +1310,64 @@ def make_pipe(nps: str, length_mm: float) -> Fitting:
     ports["end"] = Port("end", end_transform)
 
     return Fitting(nps=nps, shape=pipe, ports=ports)
+
+
+def make_threaded_pipe(nps: str, length_mm: float, thread_end: str = "both") -> Fitting:
+    """
+    Create a threaded pipe segment with defined ports.
+
+    Coordinate system:
+    - Pipe centerline is along Z-axis
+    - Pipe body from Z=0 to Z=length
+    - Flow direction: from start (Z=0) toward end (Z=length)
+
+    Ports (using standard convention - Z points OUTWARD toward connecting fitting):
+    - "start": At Z=0, Z-axis points -Z (toward fitting that connects at start)
+    - "end": At Z=length, Z-axis points +Z (toward fitting that connects at end)
+
+    For threaded connections, the pipe screws into the fitting socket.
+    The port position accounts for thread engagement depth.
+
+    Args:
+        nps: Nominal pipe size (e.g., "1/2", "1", "2")
+        length_mm: Total length of pipe in mm
+        thread_end: Which ends to thread ("both", "inlet", "outlet", "none")
+
+    Returns:
+        Fitting object with shape and ports
+    """
+    from typing import Literal, cast  # noqa: I001
+
+    from pypegen.pipe_generator import make_threaded_pipe as make_threaded_pipe_shape
+
+    # Cast thread_end to the expected Literal type
+    thread_end_literal = cast(Literal["none", "inlet", "outlet", "both"], thread_end)
+
+    # Create the threaded pipe shape
+    pipe_shape = make_threaded_pipe_shape(
+        nps=nps,
+        length=length_mm,
+        thread_end=thread_end_literal,
+        include_threads=True,
+    )
+
+    ports = {}
+
+    # For threaded pipe, the port position accounts for thread engagement
+    # Port origin is where the pipe tip will end up after screwing in
+
+    # Start port at Z=0
+    # Z-axis points -Z (outward toward the fitting connecting at this end)
+    # The port is at the pipe end (Z=0), the pipe body extends in +Z
+    start_transform = rotation_matrix_x(180)  # Flip so Z points -Z
+    ports["start"] = Port("start", start_transform)
+
+    # End port at Z=length
+    # Z-axis points +Z (outward toward the fitting connecting at this end)
+    end_transform = translation_matrix(0, 0, length_mm)
+    ports["end"] = Port("end", end_transform)
+
+    return Fitting(nps=nps, shape=pipe_shape, ports=ports)
 
 
 # =============================================================================

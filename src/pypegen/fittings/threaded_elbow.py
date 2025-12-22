@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import cadquery as cq
 
-from pypegen.fittings.npt_thread import (
+from pypegen.threads.npt_female import (
     NPT_TAPER_RATIO,
     apply_bore_id_chamfer,
     get_npt_spec,

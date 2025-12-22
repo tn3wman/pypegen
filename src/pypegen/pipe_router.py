@@ -48,6 +48,8 @@ from .fittings.pipe_fittings import (
     identity_matrix,
     make_pipe,
     make_socket_weld_elbow,
+    make_threaded_elbow_90_fitting,
+    make_threaded_pipe,
     make_weld_neck_flange,
     point_along_direction,
     rotation_from_axis_angle,
@@ -56,6 +58,11 @@ from .fittings.pipe_fittings import (
     translation_matrix,
 )
 from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000, SocketWeldElbowDims
+from .fittings.threaded_elbow import (
+    ASME_B1611_THREADED_ELBOW90_CLASS3000,
+    NPT_THREAD_ENGAGEMENT,
+    ThreadedElbowDims,
+)
 from .fittings.weld_neck_flange import ASME_B165_CLASS300_WN, WeldNeckFlangeDims
 
 # Import ComponentRecord and WeldRecord for BOM and weld tracking
@@ -220,9 +227,10 @@ class PipeRoute:
 
     Args:
         nps: Nominal pipe size (e.g., "2")
-        start_fitting: Type of starting fitting ("flange")
+        start_fitting: Type of starting fitting ("flange" or "none")
         moves: List of (direction, distance) tuples
         track_components: Whether to track components for BOM generation
+        connection_type: Type of pipe connections ("socket_weld" or "threaded")
     """
     nps: str
     start_fitting: str
@@ -233,11 +241,13 @@ class PipeRoute:
     fittings: list = field(default_factory=list)  # List[(Fitting, world_transform)] for attachment point visualization
     debug: bool = False
     track_components: bool = True  # Enable BOM and weld tracking
+    connection_type: str = "socket_weld"  # "socket_weld" or "threaded"
 
     # Set in __post_init__ - typed here for Pylance
     pipe_spec: PipeSpec = field(init=False)
-    elbow_dims: SocketWeldElbowDims = field(init=False)
-    flange_dims: WeldNeckFlangeDims = field(init=False)
+    elbow_dims: SocketWeldElbowDims | ThreadedElbowDims = field(init=False)
+    flange_dims: WeldNeckFlangeDims | None = field(init=False)
+    thread_engagement: float = field(init=False)
 
     def __post_init__(self):
         pipe_spec = PIPE_SPECS.get(self.nps)
@@ -245,15 +255,34 @@ class PipeRoute:
             raise ValueError(f"No pipe spec for NPS {self.nps}")
         self.pipe_spec = pipe_spec
 
-        elbow_dims = ASME_B1611_ELBOW90_CLASS3000.get(self.nps)
-        if elbow_dims is None:
-            raise ValueError(f"No elbow dimensions for NPS {self.nps}")
-        self.elbow_dims = elbow_dims
+        if self.connection_type == "threaded":
+            # Get threaded elbow dimensions
+            elbow_dims = ASME_B1611_THREADED_ELBOW90_CLASS3000.get(self.nps)
+            if elbow_dims is None:
+                raise ValueError(f"No threaded elbow dimensions for NPS {self.nps}")
+            self.elbow_dims = elbow_dims
 
-        flange_dims = ASME_B165_CLASS300_WN.get(self.nps)
-        if flange_dims is None:
-            raise ValueError(f"No flange dimensions for NPS {self.nps}")
-        self.flange_dims = flange_dims
+            # Get thread engagement
+            thread_spec = NPT_THREAD_ENGAGEMENT.get(self.nps)
+            if thread_spec is None:
+                raise ValueError(f"No NPT thread spec for NPS {self.nps}")
+            self.thread_engagement = thread_spec.engagement
+
+            # No flange for threaded routes (unless specified)
+            self.flange_dims = None
+        else:
+            # Socket weld
+            elbow_dims = ASME_B1611_ELBOW90_CLASS3000.get(self.nps)
+            if elbow_dims is None:
+                raise ValueError(f"No elbow dimensions for NPS {self.nps}")
+            self.elbow_dims = elbow_dims
+
+            flange_dims = ASME_B165_CLASS300_WN.get(self.nps)
+            if flange_dims is None:
+                raise ValueError(f"No flange dimensions for NPS {self.nps}")
+            self.flange_dims = flange_dims
+
+            self.thread_engagement = 0.0
 
     def _add_component(
         self,
@@ -415,6 +444,14 @@ class PipeRoute:
         self.welds = []
         self.fittings = []  # Track fittings with their world transforms for attachment point visualization
 
+        # Dispatch to appropriate build method based on connection type
+        if self.connection_type == "threaded":
+            return self._build_threaded()
+        else:
+            return self._build_socket_weld()
+
+    def _build_socket_weld(self) -> cq.Compound | None:
+        """Build a socket weld pipe route."""
         # Parse moves
         parsed_moves = []
         for direction, distance in self.moves:
@@ -691,6 +728,194 @@ class PipeRoute:
                     print(f"  Elbow center at: {elbow_center}")
                     print(f"  Inlet weld attachment: {inlet_attachment_name} at {inlet_weld_pos}")
                     print(f"  Outlet weld attachment: {outlet_attachment_name} at {outlet_weld_pos}")
+
+                # Update current port to elbow's outlet
+                current_transform = final_elbow_transform
+                current_port = outlet_port
+
+        # Combine all parts
+        if self.parts:
+            return cq.Compound.makeCompound(self.parts)
+        return None
+
+    def _build_threaded(self) -> cq.Compound | None:
+        """Build a threaded pipe route (NPT connections)."""
+        # Parse moves
+        parsed_moves = []
+        for direction, distance in self.moves:
+            dir_vec = normalize_direction(direction)
+            dist_mm = parse_distance(distance)
+            parsed_moves.append((dir_vec, dist_mm, direction))
+
+        if len(parsed_moves) == 0:
+            raise ValueError("No moves specified")
+
+        # Get elbow dimensions
+        elbow_A = self.elbow_dims.center_to_end  # mm (center to thread end)
+
+        # For threaded routes, we start directly with the first pipe
+        # Position tracking: current position and direction
+        current_pos = np.array([0.0, 0.0, 0.0])
+
+        if self.debug:
+            print("Building THREADED pipe route")
+            print(f"  Thread engagement: {self.thread_engagement:.1f}mm")
+
+        # Track current connection point using identity transform initially
+        current_transform = identity_matrix()
+        # Initialize current_port - will be set after first pipe is placed
+        current_port = None
+
+        # Process each move
+        for i, (dir_vec, dist_mm, dir_name) in enumerate(parsed_moves):
+            is_last = (i == len(parsed_moves) - 1)
+            is_first = (i == 0)
+
+            if self.debug:
+                print(f"\n--- Move {i+1}: {dir_name} {dist_mm:.1f}mm ---")
+
+            # =====================================================================
+            # Calculate pipe length for threaded connections
+            # =====================================================================
+            # For threaded: pipe screws into fittings on both ends
+            # Effective length = total distance - (thread engagement at start + thread engagement at end)
+
+            if is_first:
+                # First pipe: no fitting at start (or could have one)
+                # Just the full distance minus fitting engagement at end
+                if is_last:
+                    # Only pipe, no fittings
+                    pipe_length = dist_mm
+                else:
+                    # First pipe to elbow: pipe end screws into elbow
+                    # Distance = pipe_length + elbow_A (elbow center to thread end)
+                    # So: pipe_length = distance - elbow_A
+                    pipe_length = dist_mm - elbow_A
+            else:
+                # Pipe between elbows or after elbow
+                # Start: coming from elbow outlet, pipe screws in
+                # End: if not last, goes to elbow inlet
+                if is_last:
+                    # Last pipe: comes from elbow, extends to free end
+                    pipe_length = dist_mm - elbow_A
+                else:
+                    # Middle pipe: between two elbows
+                    # Both ends have elbow connections
+                    pipe_length = dist_mm - 2 * elbow_A
+
+            if pipe_length <= 0:
+                min_length = dist_mm + 1  # Just for error message
+                raise ValueError(
+                    f"Move {i+1} ({dir_name} {dist_mm:.1f}mm) is too short for threaded fittings. "
+                    f"Minimum: {min_length:.1f}mm"
+                )
+
+            if self.debug:
+                print(f"  Pipe length: {pipe_length:.1f}mm")
+
+            # =====================================================================
+            # Create and place threaded pipe
+            # =====================================================================
+            pipe = make_threaded_pipe(self.nps, pipe_length, thread_end="both")
+
+            if is_first:
+                # First pipe: position at origin, oriented along direction
+                # Pipe is along Z-axis by default, so we need to rotate to align with dir_vec
+                pipe_rotation = rotation_to_align_z_with_direction(dir_vec)
+                pipe_transform = pipe_rotation.copy()
+
+                # Track starting position
+                pipe_start_pos = current_pos.copy()
+            else:
+                # Pipe comes from previous elbow's outlet
+                # Mate pipe's start port to current port
+                assert current_port is not None, "current_port should be set after first pipe"
+                pipe_transform = compute_mate_transform(
+                    port_a=current_port,
+                    port_b=pipe.get_port("start"),
+                    fitting_a_transform=current_transform,
+                    gap=0  # No gap for threaded connections
+                )
+                pipe_start_pos = get_position(pipe_transform)
+
+            assert pipe.shape is not None, "Pipe shape is required"
+            pipe_shape = apply_transform_to_shape(pipe.shape, pipe_transform)
+            self.parts.append(pipe_shape)
+
+            # Track pipe for BOM
+            self._add_component(
+                component_type="pipe",
+                description="PIPE, NPT THREADED",
+                schedule_class="Sch 40",
+                shape=pipe_shape,
+                world_transform=pipe_transform,
+                length_mm=pipe_length,
+                pipe_direction=dir_name
+            )
+
+            if self.debug:
+                print(f"  Pipe placed at: {pipe_start_pos}")
+
+            # Update current connection to pipe's end
+            current_transform = pipe_transform
+            current_port = pipe.get_port("end")
+
+            # =====================================================================
+            # Place elbow (if not last move)
+            # =====================================================================
+            if not is_last:
+                next_dir = parsed_moves[i + 1][0]
+                next_dir_name = parsed_moves[i + 1][2]
+
+                elbow = make_threaded_elbow_90_fitting(self.nps, units="mm")
+
+                # Elbow orientation:
+                # - Inlet faces OPPOSITE to current pipe direction (to receive pipe)
+                # - Outlet faces toward next direction (to send pipe)
+                elbow_rotation = compute_elbow_rotation(dir_vec, next_dir)
+
+                inlet_port = elbow.get_port("inlet")
+                outlet_port = elbow.get_port("outlet")
+
+                # Get the pipe end port's world position
+                pipe_end_world = current_transform @ current_port.transform
+                pipe_end_pos = get_position(pipe_end_world)
+
+                # For threaded: pipe screws directly into elbow, no gap
+                inlet_mate_pos = pipe_end_pos
+
+                # Compute elbow center position
+                inlet_local_pos = get_position(inlet_port.transform)
+                rotated_inlet_offset = elbow_rotation[:3, :3] @ np.array(inlet_local_pos)
+
+                elbow_center = (
+                    inlet_mate_pos[0] - rotated_inlet_offset[0],
+                    inlet_mate_pos[1] - rotated_inlet_offset[1],
+                    inlet_mate_pos[2] - rotated_inlet_offset[2],
+                )
+
+                # Final elbow transform
+                final_elbow_transform = translation_matrix(*elbow_center) @ elbow_rotation
+
+                assert elbow.shape is not None, "Elbow shape is required"
+                elbow_shape = apply_transform_to_shape(elbow.shape, final_elbow_transform)
+                self.parts.append(elbow_shape)
+
+                # Track elbow for BOM
+                self._add_component(
+                    component_type="elbow",
+                    description="90° NPT THREADED ELL",
+                    schedule_class="Class 3000",
+                    shape=elbow_shape,
+                    world_transform=final_elbow_transform,
+                    connected_directions=[dir_name, next_dir_name]
+                )
+
+                # Track elbow for visualization
+                self.fittings.append((elbow, final_elbow_transform))
+
+                if self.debug:
+                    print(f"  Elbow center at: {elbow_center}")
 
                 # Update current port to elbow's outlet
                 current_transform = final_elbow_transform

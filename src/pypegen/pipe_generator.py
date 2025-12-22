@@ -13,7 +13,7 @@ from typing import Literal
 
 import cadquery as cq
 
-from .fittings.npt_thread import get_npt_spec
+from .threads.npt_male import get_npt_spec
 from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000
 
 # =============================================================================
@@ -254,7 +254,7 @@ def make_threaded_pipe(
     from OCP.TopAbs import TopAbs_SOLID
     from OCP.TopExp import TopExp_Explorer
 
-    from .fittings.npt_thread import make_npt_external_thread
+    from .threads.npt_male import make_npt_external_thread
 
     def extract_solid(shape: cq.Shape) -> cq.Solid | None:
         """Extract the largest solid from a shape (handles Compounds)."""
