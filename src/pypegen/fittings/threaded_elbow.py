@@ -21,6 +21,7 @@ from pypegen.fittings.npt_thread import (
     NPT_TAPER_RATIO,
     apply_bore_id_chamfer,
     get_npt_spec,
+    make_npt_internal_runout_cutter,
     make_npt_internal_thread_cutter,
 )
 
@@ -408,19 +409,46 @@ def make_threaded_elbow_90(
             axial_depth=axial_depth,
         )
 
-        # Step 5: Create thread cutter and cut threads
-        thread_cutter = make_npt_internal_thread_cutter(nps, thread_length)
+        # Step 4: Create thread cutter with runout
+        # Reserve space for runout at the end (going into fitting)
+        runout_turns = 0.25  # 90° fade
+        pitch = npt_spec.pitch_mm
+        runout_length = pitch * runout_turns
+        main_cutter_length = thread_length - runout_length
+
+        if main_cutter_length < pitch:
+            # Thread too short for proper runout, use full length
+            main_cutter_length = thread_length
+            runout_length = 0
+
+        # Create main thread cutter
+        thread_cutter = make_npt_internal_thread_cutter(nps, main_cutter_length)
+
+        # Add runout section with fading depth
+        full_cutter = thread_cutter
+        if runout_length > 0:
+            runout_cutter = make_npt_internal_runout_cutter(
+                nps=nps,
+                runout_turns=runout_turns,
+                z_offset=main_cutter_length,
+            )
+            if runout_cutter is not None:
+                try:
+                    full_cutter = thread_cutter.fuse(runout_cutter)
+                except Exception:
+                    # Keep just the main cutter if fuse fails
+                    pass
 
         # Cut threads for leg 1 (+X direction)
         # Thread cutter is generated along +Z axis
         # Rotate -90° around Y to align with -X axis (toward center from opening)
-        cutter1 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        cutter1 = full_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
         cutter1 = cutter1.moved(cq.Location(cq.Vector(A, 0, 0)))
         elbow = elbow.cut(cutter1)
 
         # Cut threads for leg 2 (+Y direction)
         # Rotate +90° around X to align with -Y axis (toward center from opening)
-        cutter2 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))
+        cutter2 = full_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 90))
         cutter2 = cutter2.moved(cq.Location(cq.Vector(0, A, 0)))
         elbow = elbow.cut(cutter2)
 
@@ -580,17 +608,44 @@ def make_threaded_elbow_45(
             axial_depth=axial_depth,
         )
 
-        # Step 4: Create thread cutter and cut threads
-        thread_cutter = make_npt_internal_thread_cutter(nps, thread_length)
+        # Step 4: Create thread cutter with runout
+        # Reserve space for runout at the end (going into fitting)
+        runout_turns = 0.25  # 90° fade
+        pitch = npt_spec.pitch_mm
+        runout_length = pitch * runout_turns
+        main_cutter_length = thread_length - runout_length
+
+        if main_cutter_length < pitch:
+            # Thread too short for proper runout, use full length
+            main_cutter_length = thread_length
+            runout_length = 0
+
+        # Create main thread cutter
+        thread_cutter = make_npt_internal_thread_cutter(nps, main_cutter_length)
+
+        # Add runout section with fading depth
+        full_cutter = thread_cutter
+        if runout_length > 0:
+            runout_cutter = make_npt_internal_runout_cutter(
+                nps=nps,
+                runout_turns=runout_turns,
+                z_offset=main_cutter_length,
+            )
+            if runout_cutter is not None:
+                try:
+                    full_cutter = thread_cutter.fuse(runout_cutter)
+                except Exception:
+                    # Keep just the main cutter if fuse fails
+                    pass
 
         # Cut threads for leg 1 (+X direction)
         # Rotate -90° around Y to align with -X axis
-        cutter1 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        cutter1 = full_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
         cutter1 = cutter1.moved(cq.Location(cq.Vector(A, 0, 0)))
         elbow = elbow.cut(cutter1)
 
         # Cut threads for leg 2 (135° direction)
-        cutter2 = thread_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
+        cutter2 = full_cutter.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), -90))
         cutter2 = cutter2.moved(cq.Location(cq.Vector(0, 0, 0), cq.Vector(0, 0, 1), -45))
         cutter2 = cutter2.moved(cq.Location(cq.Vector(outlet_end_x, outlet_end_y, 0)))
         elbow = elbow.cut(cutter2)
