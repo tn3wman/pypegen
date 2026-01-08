@@ -27,7 +27,12 @@ dependencies = [
     "cadquery>=2.6.1",
     "cairosvg>=2.8.2",
     "reportlab>=4.4.6",
+    "pyyaml>=6.0",
+    "click>=8.0",
 ]
+
+[project.scripts]
+pypegen-fitting = "pypegen.fittings.interactive.helper_cli:cli"
 
 [project.urls]
 Homepage = "https://github.com/tn3wman/pypegen"

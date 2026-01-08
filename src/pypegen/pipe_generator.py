@@ -6,12 +6,14 @@ parametrically, without relying on pre-made STEP files.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 import cadquery as cq
 
+from .threads.npt_male import get_npt_spec
 from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000
 
 # =============================================================================
@@ -195,6 +197,183 @@ def trim_segment_for_socket(seg: Segment, at_start: bool, port: PortDef) -> Segm
     else:
         new_end = seg.end - dir_vec * insertion
         return Segment(start=seg.start, end=new_end)
+
+
+# NPS to ASME size mapping for threaded pipe
+NPS_TO_ASME_THREADED: dict[str, str] = {
+    "1/8in": "1/8",
+    "1/4in": "1/4",
+    "3/8in": "3/8",
+    "1/2in": "1/2",
+    "3/4in": "3/4",
+    "1in": "1",
+    "1.25in": "1-1/4",
+    "1-1/4in": "1-1/4",
+    "1.5in": "1-1/2",
+    "1-1/2in": "1-1/2",
+    "2in": "2",
+    "2.5in": "2-1/2",
+    "2-1/2in": "2-1/2",
+    "3in": "3",
+    "4in": "4",
+}
+
+
+def make_threaded_pipe(
+    nps: str,
+    length: float,
+    thread_end: Literal["none", "inlet", "outlet", "both"] = "both",
+    include_threads: bool = True,
+) -> cq.Shape:
+    """
+    Create a pipe with NPT external threads on one or both ends.
+
+    The pipe is oriented with:
+    - Axis along +Z
+    - Inlet (start) at Z=0
+    - Outlet (end) at Z=length
+
+    Uses a die-cut approach: creates threaded sections using helical sweep
+    and fuses them with plain pipe sections.
+
+    Args:
+        nps: Nominal pipe size. Can be ASME format ("1/2", "1", "2")
+             or inch format ("1/2in", "1in", "2in")
+        length: Total length of pipe in mm
+        thread_end: Which ends to thread:
+            - "none": No threads (plain pipe)
+            - "inlet": Thread only the Z=0 end
+            - "outlet": Thread only the Z=length end
+            - "both": Thread both ends (default)
+        include_threads: If True, add actual NPT thread geometry.
+                        If False, return plain pipe (same as thread_end="none")
+
+    Returns:
+        CadQuery Shape of the threaded pipe
+    """
+    from OCP.TopAbs import TopAbs_SOLID
+    from OCP.TopExp import TopExp_Explorer
+
+    from .threads.npt_male import make_npt_external_thread
+
+    def extract_solid(shape: cq.Shape) -> cq.Solid | None:
+        """Extract the largest solid from a shape (handles Compounds)."""
+        if isinstance(shape, cq.Solid):
+            return shape
+        if hasattr(shape, "wrapped"):
+            exp = TopExp_Explorer(shape.wrapped, TopAbs_SOLID)
+        else:
+            exp = TopExp_Explorer(shape, TopAbs_SOLID)
+        solids = []
+        while exp.More():
+            solids.append(cq.Solid(exp.Current()))
+            exp.Next()
+        if not solids:
+            return None
+        return max(solids, key=lambda s: s.Volume())
+
+    # Normalize NPS format
+    asme_nps = NPS_TO_ASME_THREADED.get(nps, nps)
+
+    # Get NPT spec for dimensions
+    npt_spec = get_npt_spec(asme_nps)
+
+    # Pipe dimensions
+    pipe_od = npt_spec.od
+    wall_thickness = npt_spec.thread_depth * 2  # Approximate
+    pipe_id = pipe_od - 2 * wall_thickness
+
+    r_outer = pipe_od / 2.0
+    r_inner = pipe_id / 2.0
+
+    # If no threads requested, return plain pipe
+    if not include_threads or thread_end == "none":
+        outer_cyl = cq.Solid.makeCylinder(r_outer, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+        inner_cyl = cq.Solid.makeCylinder(r_inner, length, cq.Vector(0, 0, 0), cq.Vector(0, 0, 1))
+        result = outer_cyl.cut(inner_cyl)
+        return extract_solid(result) or result
+
+    thread_length = npt_spec.L2  # Effective thread length
+
+    inlet_threaded = thread_end in ("inlet", "both")
+    outlet_threaded = thread_end in ("outlet", "both")
+
+    # Calculate section positions
+    inlet_extent = thread_length if inlet_threaded else 0
+    outlet_extent = thread_length if outlet_threaded else 0
+    middle_start = inlet_extent
+    middle_length = length - inlet_extent - outlet_extent
+
+    if middle_length < 0:
+        raise ValueError(f"Pipe length {length} too short for threaded ends")
+
+    pipe = None
+
+    # 1. Create inlet section (threaded or plain)
+    if inlet_threaded:
+        # Create threaded section using die-cut approach
+        inlet_section = make_npt_external_thread(
+            nps=asme_nps,
+            thread_length=thread_length,
+            pipe_id=pipe_id,
+            end_finishes=("chamfer", "fade"),
+            runout_turns=0.25,
+        )
+        inlet_solid = extract_solid(inlet_section)
+        if inlet_solid is None:
+            raise ValueError("Failed to create inlet thread section")
+        pipe = inlet_solid
+
+    # 2. Create middle section (plain cylinder)
+    if middle_length > 0:
+        middle_cyl = cq.Solid.makeCylinder(
+            r_outer, middle_length, cq.Vector(0, 0, middle_start), cq.Vector(0, 0, 1)
+        )
+        middle_bore = cq.Solid.makeCylinder(
+            r_inner, middle_length, cq.Vector(0, 0, middle_start), cq.Vector(0, 0, 1)
+        )
+        middle_section = extract_solid(middle_cyl.cut(middle_bore))
+        if middle_section is None:
+            raise ValueError("Failed to create middle section")
+
+        if pipe is None:
+            pipe = middle_section
+        else:
+            fused = pipe.fuse(middle_section)
+            pipe = extract_solid(fused)
+            if pipe is None:
+                raise ValueError("Failed to fuse middle section")
+
+    # 3. Create outlet section (threaded)
+    if outlet_threaded:
+        # Create threaded section using die-cut approach
+        outlet_section = make_npt_external_thread(
+            nps=asme_nps,
+            thread_length=thread_length,
+            pipe_id=pipe_id,
+            end_finishes=("chamfer", "fade"),
+            runout_turns=0.25,
+        )
+        outlet_solid = extract_solid(outlet_section)
+        if outlet_solid is None:
+            raise ValueError("Failed to create outlet thread section")
+
+        # Flip so free end (small diameter) is at Z=length
+        outlet_solid = outlet_solid.rotate(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180)
+        outlet_solid = outlet_solid.translate(cq.Vector(0, 0, length))
+
+        if pipe is None:
+            pipe = outlet_solid
+        else:
+            fused = pipe.fuse(outlet_solid)
+            pipe = extract_solid(fused)
+            if pipe is None:
+                raise ValueError("Failed to fuse pipe sections")
+
+    if pipe is None:
+        raise ValueError("Failed to create pipe")
+
+    return pipe
 
 
 # =============================================================================

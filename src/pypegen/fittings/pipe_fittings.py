@@ -48,12 +48,28 @@ from dataclasses import dataclass, field
 import cadquery as cq
 import numpy as np
 
+# Import butt weld tee
+from .butt_weld_tee import ASME_B169_TEE, make_butt_weld_tee
 from .socket_weld_elbow import (
     ASME_B1611_ELBOW45_CLASS3000,
     ASME_B1611_ELBOW90_CLASS3000,
+)
+from .socket_weld_elbow import (
     make_socket_weld_elbow_45 as make_socket_weld_elbow_45_shape,
+)
+from .socket_weld_elbow import (
     make_socket_weld_elbow_90 as make_socket_weld_elbow_90_shape,
 )
+
+# Import threaded fittings
+from .threaded_elbow import (
+    ASME_B1611_THREADED_ELBOW45_CLASS3000,
+    ASME_B1611_THREADED_ELBOW90_CLASS3000,
+    NPT_THREAD_ENGAGEMENT,
+    make_threaded_elbow_45,
+    make_threaded_elbow_90,
+)
+from .threaded_tee import ASME_B1611_THREADED_TEE_CLASS3000, make_threaded_tee
 
 # Import dimension data and shape creation function
 from .weld_neck_flange import ASME_B165_CLASS300_WN, make_weld_neck_flange_class300
@@ -62,16 +78,13 @@ from .weld_neck_flange import ASME_B165_CLASS300_WN, make_weld_neck_flange_class
 # TRANSFORMATION MATRIX UTILITIES
 # =============================================================================
 
+
 def identity_matrix() -> np.ndarray:
     """Return 4x4 identity matrix."""
     return np.eye(4)
 
 
-def point_along_direction(
-    point: tuple[float, float, float],
-    direction: tuple[float, float, float],
-    distance: float
-) -> tuple[float, float, float]:
+def point_along_direction(point: tuple[float, float, float], direction: tuple[float, float, float], distance: float) -> tuple[float, float, float]:
     """
     Compute a point offset from the given point along a direction.
 
@@ -83,11 +96,7 @@ def point_along_direction(
     Returns:
         New point (x + distance*dx, y + distance*dy, z + distance*dz)
     """
-    return (
-        point[0] + distance * direction[0],
-        point[1] + distance * direction[1],
-        point[2] + distance * direction[2]
-    )
+    return (point[0] + distance * direction[0], point[1] + distance * direction[1], point[2] + distance * direction[2])
 
 
 def translation_matrix(x: float, y: float, z: float) -> np.ndarray:
@@ -140,24 +149,24 @@ def rotation_from_axis_angle(axis: tuple[float, float, float], angle_deg: float)
     angle = math.radians(angle_deg)
     x, y, z = axis
     # Normalize axis
-    norm = math.sqrt(x*x + y*y + z*z)
+    norm = math.sqrt(x * x + y * y + z * z)
     if norm < 1e-10:
         return np.eye(4)
-    x, y, z = x/norm, y/norm, z/norm
+    x, y, z = x / norm, y / norm, z / norm
 
     c, s = math.cos(angle), math.sin(angle)
     t = 1 - c
 
     R = np.eye(4)
-    R[0, 0] = t*x*x + c
-    R[0, 1] = t*x*y - z*s
-    R[0, 2] = t*x*z + y*s
-    R[1, 0] = t*x*y + z*s
-    R[1, 1] = t*y*y + c
-    R[1, 2] = t*y*z - x*s
-    R[2, 0] = t*x*z - y*s
-    R[2, 1] = t*y*z + x*s
-    R[2, 2] = t*z*z + c
+    R[0, 0] = t * x * x + c
+    R[0, 1] = t * x * y - z * s
+    R[0, 2] = t * x * z + y * s
+    R[1, 0] = t * x * y + z * s
+    R[1, 1] = t * y * y + c
+    R[1, 2] = t * y * z - x * s
+    R[2, 0] = t * x * z - y * s
+    R[2, 1] = t * y * z + x * s
+    R[2, 2] = t * z * z + c
     return R
 
 
@@ -212,7 +221,7 @@ def matrix_to_cadquery_location(T: np.ndarray) -> tuple[cq.Location, tuple[float
 
     # Calculate Euler angles (ZYX convention)
     # This is a simplified extraction
-    sy = math.sqrt(R[0, 0]**2 + R[1, 0]**2)
+    sy = math.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
     singular = sy < 1e-6
 
     if not singular:
@@ -260,9 +269,8 @@ def apply_transform_to_shape(shape: cq.Shape, T: np.ndarray) -> cq.Shape:
 # UP-VECTOR COMPUTATION HELPERS
 # =============================================================================
 
-def compute_initial_up_vector(
-    direction: tuple[float, float, float]
-) -> tuple[float, float, float]:
+
+def compute_initial_up_vector(direction: tuple[float, float, float]) -> tuple[float, float, float]:
     """
     Compute the initial up-vector for a given direction.
 
@@ -286,11 +294,7 @@ def compute_initial_up_vector(
         return (0.0, 0.0, 1.0)
 
 
-def compute_up_vector_after_elbow(
-    incoming_direction: tuple[float, float, float],
-    outgoing_direction: tuple[float, float, float],
-    current_up: tuple[float, float, float]
-) -> tuple[float, float, float]:
+def compute_up_vector_after_elbow(incoming_direction: tuple[float, float, float], outgoing_direction: tuple[float, float, float], current_up: tuple[float, float, float]) -> tuple[float, float, float]:
     """
     Compute the new up-vector after traversing an elbow.
 
@@ -332,11 +336,7 @@ def compute_up_vector_after_elbow(
     cos_a = np.cos(angle)
     sin_a = np.sin(angle)
 
-    up_rotated = (
-        up * cos_a +
-        np.cross(axis, up) * sin_a +
-        axis * np.dot(axis, up) * (1 - cos_a)
-    )
+    up_rotated = up * cos_a + np.cross(axis, up) * sin_a + axis * np.dot(axis, up) * (1 - cos_a)
 
     # Normalize
     up_rotated = up_rotated / np.linalg.norm(up_rotated)
@@ -344,11 +344,7 @@ def compute_up_vector_after_elbow(
     return (float(up_rotated[0]), float(up_rotated[1]), float(up_rotated[2]))
 
 
-def compute_up_vector_for_branch(
-    run_direction: tuple[float, float, float],
-    branch_direction: tuple[float, float, float],
-    current_up: tuple[float, float, float]
-) -> tuple[float, float, float]:
+def compute_up_vector_for_branch(run_direction: tuple[float, float, float], branch_direction: tuple[float, float, float], current_up: tuple[float, float, float]) -> tuple[float, float, float]:
     """
     Compute the up-vector for a branch coming off a tee or cross.
 
@@ -399,6 +395,7 @@ def compute_up_vector_for_branch(
 # COORDINATE FRAME VISUALIZATION
 # =============================================================================
 
+
 def create_coordinate_frame_marker(
     transform: np.ndarray,
     scale: float = 25.0,
@@ -437,10 +434,10 @@ def create_coordinate_frame_marker(
     for axis_dir in [x_axis, y_axis, z_axis]:
         # Normalize direction
         dx, dy, dz = axis_dir
-        length = math.sqrt(dx*dx + dy*dy + dz*dz)
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
         if length < 1e-6:
             continue
-        dx, dy, dz = dx/length, dy/length, dz/length
+        dx, dy, dz = dx / length, dy / length, dz / length
 
         # Create arrow shaft (cylinder from origin along direction)
         shaft = cq.Solid.makeCylinder(
@@ -503,6 +500,7 @@ def create_port_markers_for_fitting(
 # PORT DEFINITION
 # =============================================================================
 
+
 @dataclass
 class Port:
     """
@@ -513,6 +511,7 @@ class Port:
     - Z-axis points OUTWARD (direction a connected pipe would go)
     - X-axis is typically "up" for orientation reference
     """
+
     name: str
     # 4x4 transformation matrix defining port's coordinate frame
     # relative to the fitting's origin
@@ -532,6 +531,7 @@ class Port:
 # =============================================================================
 # ATTACHMENT POINT DEFINITION
 # =============================================================================
+
 
 @dataclass
 class AttachmentPoint:
@@ -556,20 +556,23 @@ class AttachmentPoint:
         attachment_type: "weld", "bom", or "label"
         port_name: Which port this attachment is associated with (e.g., "inlet", "outlet")
     """
+
     name: str
     position: tuple[float, float, float]  # Local coordinates on fitting surface
-    normal: tuple[float, float, float]    # Outward direction from surface
-    attachment_type: str = "weld"         # "weld", "bom", or "label"
-    port_name: str | None = None       # Associated port name
+    normal: tuple[float, float, float]  # Outward direction from surface
+    attachment_type: str = "weld"  # "weld", "bom", or "label"
+    port_name: str | None = None  # Associated port name
 
 
 # =============================================================================
 # FITTING BASE CLASS
 # =============================================================================
 
+
 @dataclass
 class Fitting:
     """Base class for pipe fittings with ports and attachment points."""
+
     nps: str
     shape: cq.Shape | None = None
     ports: dict[str, Port] = field(default_factory=dict)
@@ -601,11 +604,7 @@ class Fitting:
             raise ValueError("Fitting has no shape")
         return apply_transform_to_shape(self.shape, T)
 
-    def get_attachment_point_world_position(
-        self,
-        point_name: str,
-        fitting_transform: np.ndarray
-    ) -> tuple[float, float, float]:
+    def get_attachment_point_world_position(self, point_name: str, fitting_transform: np.ndarray) -> tuple[float, float, float]:
         """
         Get the world position of an attachment point given the fitting's world transform.
 
@@ -626,11 +625,7 @@ class Fitting:
 
         return (world_pos[0], world_pos[1], world_pos[2])
 
-    def get_attachment_point_world_normal(
-        self,
-        point_name: str,
-        fitting_transform: np.ndarray
-    ) -> tuple[float, float, float]:
+    def get_attachment_point_world_normal(self, point_name: str, fitting_transform: np.ndarray) -> tuple[float, float, float]:
         """
         Get the world normal of an attachment point given the fitting's world transform.
 
@@ -661,6 +656,7 @@ class Fitting:
 # =============================================================================
 # WELD NECK FLANGE
 # =============================================================================
+
 
 def make_weld_neck_flange(nps: str, units: str = "mm") -> Fitting:
     """
@@ -720,21 +716,15 @@ def make_weld_neck_flange(nps: str, units: str = "mm") -> Fitting:
     # Weld attachment points around the hub end (a circle in the XY plane at Z=-hub_length)
     weld_attachment_positions = [
         # (name suffix, X offset, Y offset, normal_x, normal_y)
-        ("east",   r_hub_weld,  0.0,          1.0,  0.0),   # +X
-        ("west",  -r_hub_weld,  0.0,         -1.0,  0.0),   # -X
-        ("north",  0.0,         r_hub_weld,   0.0,  1.0),   # +Y
-        ("south",  0.0,        -r_hub_weld,   0.0, -1.0),   # -Y
+        ("east", r_hub_weld, 0.0, 1.0, 0.0),  # +X
+        ("west", -r_hub_weld, 0.0, -1.0, 0.0),  # -X
+        ("north", 0.0, r_hub_weld, 0.0, 1.0),  # +Y
+        ("south", 0.0, -r_hub_weld, 0.0, -1.0),  # -Y
     ]
 
     for suffix, x_off, y_off, nx, ny in weld_attachment_positions:
         name = f"weld_{suffix}"
-        attachment_points[name] = AttachmentPoint(
-            name=name,
-            position=(x_off, y_off, -hub_length),
-            normal=(nx, ny, 0.0),
-            attachment_type="weld",
-            port_name="weld"
-        )
+        attachment_points[name] = AttachmentPoint(name=name, position=(x_off, y_off, -hub_length), normal=(nx, ny, 0.0), attachment_type="weld", port_name="weld")
 
     return Fitting(nps=nps, shape=flange_shape, ports=ports, attachment_points=attachment_points)
 
@@ -742,6 +732,7 @@ def make_weld_neck_flange(nps: str, units: str = "mm") -> Fitting:
 # =============================================================================
 # SOCKET WELD ELBOW
 # =============================================================================
+
 
 def make_socket_weld_elbow(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
     """
@@ -829,41 +820,29 @@ def make_socket_weld_elbow(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG
     # Points at orthogonal positions around the socket ID (where pipe enters and fillet weld is applied)
     inlet_attachment_positions = [
         # (name suffix, Y offset, Z offset, normal_y, normal_z)
-        ("up",    0.0,             r_socket_inner, 0.0,  1.0),   # +Z
-        ("down",  0.0,            -r_socket_inner, 0.0, -1.0),   # -Z
-        ("north", r_socket_inner,  0.0,            1.0,  0.0),   # +Y
-        ("south",-r_socket_inner,  0.0,           -1.0,  0.0),   # -Y
+        ("up", 0.0, r_socket_inner, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_socket_inner, 0.0, -1.0),  # -Z
+        ("north", r_socket_inner, 0.0, 1.0, 0.0),  # +Y
+        ("south", -r_socket_inner, 0.0, -1.0, 0.0),  # -Y
     ]
 
     for suffix, y_off, z_off, ny, nz in inlet_attachment_positions:
         name = f"inlet_weld_{suffix}"
-        attachment_points[name] = AttachmentPoint(
-            name=name,
-            position=(socket_opening_x, y_off, z_off),
-            normal=(0.0, ny, nz),
-            attachment_type="weld",
-            port_name="inlet"
-        )
+        attachment_points[name] = AttachmentPoint(name=name, position=(socket_opening_x, y_off, z_off), normal=(0.0, ny, nz), attachment_type="weld", port_name="inlet")
 
     # Outlet socket opening is at (0, A+J, 0) - a circle in the XZ plane
     # Points at orthogonal positions around the socket ID (where pipe enters and fillet weld is applied)
     outlet_attachment_positions = [
         # (name suffix, X offset, Z offset, normal_x, normal_z)
-        ("up",    0.0,             r_socket_inner, 0.0,  1.0),   # +Z
-        ("down",  0.0,            -r_socket_inner, 0.0, -1.0),   # -Z
-        ("east",  r_socket_inner,  0.0,            1.0,  0.0),   # +X
-        ("west", -r_socket_inner,  0.0,           -1.0,  0.0),   # -X
+        ("up", 0.0, r_socket_inner, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_socket_inner, 0.0, -1.0),  # -Z
+        ("east", r_socket_inner, 0.0, 1.0, 0.0),  # +X
+        ("west", -r_socket_inner, 0.0, -1.0, 0.0),  # -X
     ]
 
     for suffix, x_off, z_off, nx, nz in outlet_attachment_positions:
         name = f"outlet_weld_{suffix}"
-        attachment_points[name] = AttachmentPoint(
-            name=name,
-            position=(x_off, socket_opening_y, z_off),
-            normal=(nx, 0.0, nz),
-            attachment_type="weld",
-            port_name="outlet"
-        )
+        attachment_points[name] = AttachmentPoint(name=name, position=(x_off, socket_opening_y, z_off), normal=(nx, 0.0, nz), attachment_type="weld", port_name="outlet")
 
     return Fitting(nps=nps, shape=elbow, ports=ports, attachment_points=attachment_points)
 
@@ -920,11 +899,7 @@ def make_socket_weld_elbow_45(nps: str, units: str = "mm") -> Fitting:  # noqa: 
     # Z-axis points in outlet direction (outward)
     # Need rotation that aligns Z with (dir_x, dir_y, 0)
     # Rotate around Z by 135° from +X, then rotate around Y by 90° to point Z outward
-    outlet_transform = (
-        translation_matrix(outlet_x, outlet_y, 0)
-        @ rotation_matrix_z(135)
-        @ rotation_matrix_y(90)
-    )
+    outlet_transform = translation_matrix(outlet_x, outlet_y, 0) @ rotation_matrix_z(135) @ rotation_matrix_y(90)
     ports["outlet"] = Port("outlet", outlet_transform)
 
     # ==========================================================================
@@ -940,21 +915,15 @@ def make_socket_weld_elbow_45(nps: str, units: str = "mm") -> Fitting:  # noqa: 
     # Inlet socket opening is at (A+J, 0, 0) - a circle in the YZ plane
     inlet_attachment_positions = [
         # (name suffix, Y offset, Z offset, normal_y, normal_z)
-        ("up",    0.0,             r_socket_inner, 0.0,  1.0),
-        ("down",  0.0,            -r_socket_inner, 0.0, -1.0),
-        ("north", r_socket_inner,  0.0,            1.0,  0.0),
-        ("south",-r_socket_inner,  0.0,           -1.0,  0.0),
+        ("up", 0.0, r_socket_inner, 0.0, 1.0),
+        ("down", 0.0, -r_socket_inner, 0.0, -1.0),
+        ("north", r_socket_inner, 0.0, 1.0, 0.0),
+        ("south", -r_socket_inner, 0.0, -1.0, 0.0),
     ]
 
     for suffix, y_off, z_off, ny, nz in inlet_attachment_positions:
         name = f"inlet_weld_{suffix}"
-        attachment_points[name] = AttachmentPoint(
-            name=name,
-            position=(socket_opening_inlet_x, y_off, z_off),
-            normal=(0.0, ny, nz),
-            attachment_type="weld",
-            port_name="inlet"
-        )
+        attachment_points[name] = AttachmentPoint(name=name, position=(socket_opening_inlet_x, y_off, z_off), normal=(0.0, ny, nz), attachment_type="weld", port_name="inlet")
 
     # Outlet socket opening - perpendicular to outlet direction
     # The outlet direction is (dir_x, dir_y, 0), so perpendicular directions are:
@@ -965,38 +934,320 @@ def make_socket_weld_elbow_45(nps: str, units: str = "mm") -> Fitting:  # noqa: 
 
     outlet_attachment_positions = [
         # (name suffix, local offset perpendicular to outlet dir, normal direction)
-        ("up",    (0.0, 0.0, r_socket_inner), (0.0, 0.0, 1.0)),
-        ("down",  (0.0, 0.0, -r_socket_inner), (0.0, 0.0, -1.0)),
-        ("left",  (perp_x * r_socket_inner, perp_y * r_socket_inner, 0.0),
-                  (perp_x, perp_y, 0.0)),
-        ("right", (-perp_x * r_socket_inner, -perp_y * r_socket_inner, 0.0),
-                  (-perp_x, -perp_y, 0.0)),
+        ("up", (0.0, 0.0, r_socket_inner), (0.0, 0.0, 1.0)),
+        ("down", (0.0, 0.0, -r_socket_inner), (0.0, 0.0, -1.0)),
+        ("left", (perp_x * r_socket_inner, perp_y * r_socket_inner, 0.0), (perp_x, perp_y, 0.0)),
+        ("right", (-perp_x * r_socket_inner, -perp_y * r_socket_inner, 0.0), (-perp_x, -perp_y, 0.0)),
     ]
 
     for suffix, offset, normal in outlet_attachment_positions:
         name = f"outlet_weld_{suffix}"
         attachment_points[name] = AttachmentPoint(
-            name=name,
-            position=(
-                socket_opening_outlet_x + offset[0],
-                socket_opening_outlet_y + offset[1],
-                offset[2]
-            ),
-            normal=normal,
-            attachment_type="weld",
-            port_name="outlet"
+            name=name, position=(socket_opening_outlet_x + offset[0], socket_opening_outlet_y + offset[1], offset[2]), normal=normal, attachment_type="weld", port_name="outlet"
         )
 
     return Fitting(nps=nps, shape=elbow, ports=ports, attachment_points=attachment_points)
 
 
 # =============================================================================
+# BUTT WELD TEE
+# =============================================================================
+
+
+def make_butt_weld_tee_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create a butt weld equal tee with defined ports.
+
+    Coordinate system:
+    - Tee center (where run and branch intersect) is at origin
+    - Run extends along X axis (inlet at -X, run-out at +X)
+    - Branch extends along +Y axis
+
+    Ports:
+    - "inlet": End of run at -X, pipe enters from -X direction
+    - "run": End of run at +X, pipe exits in +X direction
+    - "branch": End of branch at +Y, pipe exits in +Y direction
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    """
+    dims = ASME_B169_TEE.get(nps)
+    if dims is None:
+        raise ValueError(f"No butt weld tee dimensions for NPS {nps}")
+
+    # Dimensions (in mm)
+    C_run = dims.center_to_end_run  # Center to end (run)
+    M_branch = dims.center_to_end_branch  # Center to end (branch)
+    r_outer = dims.od / 2.0  # Outer radius for attachment points
+
+    # Get tee shape
+    tee_shape = make_butt_weld_tee(nps)
+
+    # Define ports using standard convention:
+    # - Port origin: at the weld end (where pipe connects)
+    # - Port Z-axis: points OUTWARD toward where the connecting pipe's body extends
+    # - Port X-axis: defines rotational orientation (typically "up" = +Z world)
+    #
+    # Tee geometry:
+    # - Run along X axis: from (-C_run, 0, 0) to (+C_run, 0, 0)
+    # - Branch along +Y axis: from (0, 0, 0) to (0, M_branch, 0)
+
+    ports = {}
+
+    # Inlet port: at -X end of run
+    # Z-axis points -X (outward, toward where incoming pipe body extends)
+    # X-axis points +Z (up, for rotational reference)
+    # rotation_matrix_y(-90) rotates +Z to point in -X direction
+    inlet_transform = translation_matrix(-C_run, 0, 0) @ rotation_matrix_y(-90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Run port: at +X end of run
+    # Z-axis points +X (outward, toward where outgoing pipe body extends)
+    # X-axis points +Z (up, for rotational reference)
+    run_transform = translation_matrix(C_run, 0, 0) @ rotation_matrix_y(90)
+    ports["run"] = Port("run", run_transform)
+
+    # Branch port: at +Y end of branch
+    # Z-axis points +Y (outward, toward where branch pipe body extends)
+    # X-axis points +Z (up, for rotational reference)
+    branch_transform = translation_matrix(0, M_branch, 0) @ rotation_matrix_x(-90)
+    ports["branch"] = Port("branch", branch_transform)
+
+    # ==========================================================================
+    # WELD ATTACHMENT POINTS
+    # ==========================================================================
+    # Butt weld attachment points are at the weld seam location on outer surface.
+    # Each port has 4 attachment points around the OD circle.
+
+    attachment_points = {}
+
+    # Inlet weld attachment points at (-C_run, 0, 0) - a circle in the YZ plane
+    inlet_attachment_positions = [
+        # (name suffix, Y offset, Z offset, normal_y, normal_z)
+        ("up", 0.0, r_outer, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_outer, 0.0, -1.0),  # -Z
+        ("north", r_outer, 0.0, 1.0, 0.0),  # +Y
+        ("south", -r_outer, 0.0, -1.0, 0.0),  # -Y
+    ]
+
+    for suffix, y_off, z_off, ny, nz in inlet_attachment_positions:
+        name = f"inlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(name=name, position=(-C_run, y_off, z_off), normal=(0.0, ny, nz), attachment_type="weld", port_name="inlet")
+
+    # Run weld attachment points at (+C_run, 0, 0) - a circle in the YZ plane
+    run_attachment_positions = [
+        # (name suffix, Y offset, Z offset, normal_y, normal_z)
+        ("up", 0.0, r_outer, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_outer, 0.0, -1.0),  # -Z
+        ("north", r_outer, 0.0, 1.0, 0.0),  # +Y
+        ("south", -r_outer, 0.0, -1.0, 0.0),  # -Y
+    ]
+
+    for suffix, y_off, z_off, ny, nz in run_attachment_positions:
+        name = f"run_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(name=name, position=(C_run, y_off, z_off), normal=(0.0, ny, nz), attachment_type="weld", port_name="run")
+
+    # Branch weld attachment points at (0, M_branch, 0) - a circle in the XZ plane
+    branch_attachment_positions = [
+        # (name suffix, X offset, Z offset, normal_x, normal_z)
+        ("up", 0.0, r_outer, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_outer, 0.0, -1.0),  # -Z
+        ("east", r_outer, 0.0, 1.0, 0.0),  # +X
+        ("west", -r_outer, 0.0, -1.0, 0.0),  # -X
+    ]
+
+    for suffix, x_off, z_off, nx, nz in branch_attachment_positions:
+        name = f"branch_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(name=name, position=(x_off, M_branch, z_off), normal=(nx, 0.0, nz), attachment_type="weld", port_name="branch")
+
+    return Fitting(nps=nps, shape=tee_shape, ports=ports, attachment_points=attachment_points)
+
+
+# =============================================================================
+# NPT THREADED ELBOW
+# =============================================================================
+
+
+def make_threaded_elbow_90_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create a 90° NPT threaded elbow with defined ports.
+
+    Coordinate system:
+    - Elbow center (where the two legs meet) is at origin
+    - Leg 1 extends along +X axis (inlet port at +X end)
+    - Leg 2 extends along +Y axis (outlet port at +Y end)
+
+    Ports:
+    - "inlet": Thread end on +X axis, pipe enters from +X direction
+    - "outlet": Thread end on +Y axis, pipe exits in +Y direction
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    Note: No weld attachment points for threaded fittings.
+    """
+    dims = ASME_B1611_THREADED_ELBOW90_CLASS3000.get(nps)
+    if dims is None:
+        raise ValueError(f"No threaded 90° elbow dimensions for NPS {nps}")
+
+    thread_spec = NPT_THREAD_ENGAGEMENT.get(nps)
+    if thread_spec is None:
+        raise ValueError(f"No NPT thread spec for NPS {nps}")
+
+    # Dimensions
+    A = dims.center_to_end  # Center to thread end
+    thread_engagement = thread_spec.engagement  # How far pipe screws in
+
+    # Get elbow shape with threads
+    elbow_shape = make_threaded_elbow_90(nps, include_threads=True)
+
+    # Port position: where pipe tip ends up after threading in
+    # Port is at center_to_end minus thread engagement
+    port_offset = A - thread_engagement
+
+    ports = {}
+
+    # Inlet port: at end of leg 1 (accounting for thread engagement)
+    # Z-axis points +X (outward, toward where incoming pipe body extends)
+    inlet_transform = translation_matrix(port_offset, 0, 0) @ rotation_matrix_y(90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Outlet port: at end of leg 2 (accounting for thread engagement)
+    # Z-axis points +Y (outward, toward where outgoing pipe body extends)
+    outlet_transform = translation_matrix(0, port_offset, 0) @ rotation_matrix_x(-90)
+    ports["outlet"] = Port("outlet", outlet_transform)
+
+    # No attachment points for threaded fittings (no welds)
+    attachment_points: dict[str, AttachmentPoint] = {}
+
+    return Fitting(nps=nps, shape=elbow_shape, ports=ports, attachment_points=attachment_points)
+
+
+def make_threaded_elbow_45_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create a 45° NPT threaded elbow with defined ports.
+
+    Coordinate system:
+    - Elbow center is at origin
+    - Leg 1 extends along +X axis (inlet port at +X end)
+    - Leg 2 extends at 45° toward +Y (outlet port)
+
+    Ports:
+    - "inlet": Thread end on +X axis, pipe enters from +X direction
+    - "outlet": Thread end at 45°, pipe exits at 45° from inlet
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    Note: No weld attachment points for threaded fittings.
+    """
+    dims = ASME_B1611_THREADED_ELBOW45_CLASS3000.get(nps)
+    if dims is None:
+        raise ValueError(f"No threaded 45° elbow dimensions for NPS {nps}")
+
+    thread_spec = NPT_THREAD_ENGAGEMENT.get(nps)
+    if thread_spec is None:
+        raise ValueError(f"No NPT thread spec for NPS {nps}")
+
+    # Dimensions
+    A = dims.center_to_end  # Center to thread end
+    thread_engagement = thread_spec.engagement
+
+    # Get elbow shape with threads
+    elbow_shape = make_threaded_elbow_45(nps, include_threads=True)
+
+    # Port position accounting for thread engagement
+    port_offset = A - thread_engagement
+
+    # Direction for 45° leg
+    angle_rad = math.radians(135)
+    dir_x = math.cos(angle_rad)
+    dir_y = math.sin(angle_rad)
+
+    # Outlet port position
+    outlet_x = port_offset * dir_x
+    outlet_y = port_offset * dir_y
+
+    ports = {}
+
+    # Inlet port
+    inlet_transform = translation_matrix(port_offset, 0, 0) @ rotation_matrix_y(90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Outlet port at 45°
+    outlet_transform = translation_matrix(outlet_x, outlet_y, 0) @ rotation_matrix_z(135) @ rotation_matrix_y(90)
+    ports["outlet"] = Port("outlet", outlet_transform)
+
+    # No attachment points for threaded fittings
+    attachment_points: dict[str, AttachmentPoint] = {}
+
+    return Fitting(nps=nps, shape=elbow_shape, ports=ports, attachment_points=attachment_points)
+
+
+# =============================================================================
+# NPT THREADED TEE
+# =============================================================================
+
+
+def make_threaded_tee_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create an NPT threaded equal tee with defined ports.
+
+    Coordinate system:
+    - Tee center (where run and branch intersect) is at origin
+    - Run extends along X axis (inlet at -X, run-out at +X)
+    - Branch extends along +Y axis
+
+    Ports:
+    - "inlet": End of run at -X, pipe enters from -X direction
+    - "run": End of run at +X, pipe exits in +X direction
+    - "branch": End of branch at +Y, pipe exits in +Y direction
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    Note: No weld attachment points for threaded fittings.
+    """
+    dims = ASME_B1611_THREADED_TEE_CLASS3000.get(nps)
+    if dims is None:
+        raise ValueError(f"No threaded tee dimensions for NPS {nps}")
+
+    thread_spec = NPT_THREAD_ENGAGEMENT.get(nps)
+    if thread_spec is None:
+        raise ValueError(f"No NPT thread spec for NPS {nps}")
+
+    # Dimensions
+    A = dims.center_to_end  # Center to thread end
+    thread_engagement = thread_spec.engagement
+
+    # Get tee shape with threads
+    tee_shape = make_threaded_tee(nps, include_threads=True)
+
+    # Port position accounting for thread engagement
+    port_offset = A - thread_engagement
+
+    ports = {}
+
+    # Inlet port: at -X end of run
+    inlet_transform = translation_matrix(-port_offset, 0, 0) @ rotation_matrix_y(-90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Run port: at +X end of run
+    run_transform = translation_matrix(port_offset, 0, 0) @ rotation_matrix_y(90)
+    ports["run"] = Port("run", run_transform)
+
+    # Branch port: at +Y end of branch
+    branch_transform = translation_matrix(0, port_offset, 0) @ rotation_matrix_x(-90)
+    ports["branch"] = Port("branch", branch_transform)
+
+    # No attachment points for threaded fittings (no welds)
+    attachment_points: dict[str, AttachmentPoint] = {}
+
+    return Fitting(nps=nps, shape=tee_shape, ports=ports, attachment_points=attachment_points)
+
+
+# =============================================================================
 # PIPE SEGMENT
 # =============================================================================
+
 
 @dataclass
 class PipeSpec:
     """Pipe dimensions."""
+
     nps: str
     od_mm: float
     wall_mm: float
@@ -1061,16 +1312,70 @@ def make_pipe(nps: str, length_mm: float) -> Fitting:
     return Fitting(nps=nps, shape=pipe, ports=ports)
 
 
+def make_threaded_pipe(nps: str, length_mm: float, thread_end: str = "both") -> Fitting:
+    """
+    Create a threaded pipe segment with defined ports.
+
+    Coordinate system:
+    - Pipe centerline is along Z-axis
+    - Pipe body from Z=0 to Z=length
+    - Flow direction: from start (Z=0) toward end (Z=length)
+
+    Ports (using standard convention - Z points OUTWARD toward connecting fitting):
+    - "start": At Z=0, Z-axis points -Z (toward fitting that connects at start)
+    - "end": At Z=length, Z-axis points +Z (toward fitting that connects at end)
+
+    For threaded connections, the pipe screws into the fitting socket.
+    The port position accounts for thread engagement depth.
+
+    Args:
+        nps: Nominal pipe size (e.g., "1/2", "1", "2")
+        length_mm: Total length of pipe in mm
+        thread_end: Which ends to thread ("both", "inlet", "outlet", "none")
+
+    Returns:
+        Fitting object with shape and ports
+    """
+    from typing import Literal, cast  # noqa: I001
+
+    from pypegen.pipe_generator import make_threaded_pipe as make_threaded_pipe_shape
+
+    # Cast thread_end to the expected Literal type
+    thread_end_literal = cast(Literal["none", "inlet", "outlet", "both"], thread_end)
+
+    # Create the threaded pipe shape
+    pipe_shape = make_threaded_pipe_shape(
+        nps=nps,
+        length=length_mm,
+        thread_end=thread_end_literal,
+        include_threads=True,
+    )
+
+    ports = {}
+
+    # For threaded pipe, the port position accounts for thread engagement
+    # Port origin is where the pipe tip will end up after screwing in
+
+    # Start port at Z=0
+    # Z-axis points -Z (outward toward the fitting connecting at this end)
+    # The port is at the pipe end (Z=0), the pipe body extends in +Z
+    start_transform = rotation_matrix_x(180)  # Flip so Z points -Z
+    ports["start"] = Port("start", start_transform)
+
+    # End port at Z=length
+    # Z-axis points +Z (outward toward the fitting connecting at this end)
+    end_transform = translation_matrix(0, 0, length_mm)
+    ports["end"] = Port("end", end_transform)
+
+    return Fitting(nps=nps, shape=pipe_shape, ports=ports)
+
+
 # =============================================================================
 # MATING CALCULATION
 # =============================================================================
 
-def compute_mate_transform(
-    port_a: Port,
-    port_b: Port,
-    fitting_a_transform: np.ndarray,
-    gap: float = 0.0
-) -> np.ndarray:
+
+def compute_mate_transform(port_a: Port, port_b: Port, fitting_a_transform: np.ndarray, gap: float = 0.0) -> np.ndarray:
     """
     Compute the world transform for fitting B such that port B mates with port A.
 
@@ -1150,6 +1455,7 @@ def compute_mate_transform(
 # TEST
 # =============================================================================
 
+
 def test_fittings():
     """Test the fitting creation and port definitions."""
     print("Testing Pipe Fittings with Coordinate Frames")
@@ -1196,18 +1502,13 @@ def test_fittings():
     gap = 1.6  # 1/16" = 1.6mm
 
     # Mate pipe's start port to flange's weld port
-    pipe_world = compute_mate_transform(
-        port_a=flange.get_port("weld"),
-        port_b=pipe.get_port("start"),
-        fitting_a_transform=flange_world,
-        gap=gap
-    )
+    pipe_world = compute_mate_transform(port_a=flange.get_port("weld"), port_b=pipe.get_port("start"), fitting_a_transform=flange_world, gap=gap)
 
     print(f"  Pipe world position: {get_position(pipe_world)}")
     # Pipe starts at flange weld port + gap along weld direction (-Z)
     # weld port at z=-hub_length, weld direction is -Z
     # pipe position = weld_pos + gap * (-Z) = (0, 0, -hub_length - gap)
-    expected_z = flange.get_port('weld').position[2] - gap  # -76.2 - 1.6 = -77.8
+    expected_z = flange.get_port("weld").position[2] - gap  # -76.2 - 1.6 = -77.8
     print(f"  Expected: near (0, 0, {expected_z:.1f})")
 
     # Create assembly
