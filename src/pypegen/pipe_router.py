@@ -491,11 +491,13 @@ class PipeRoute:
         first_dir_name = parsed_moves[0][2]  # Direction name like "east"
 
         # Track flange for BOM - flange connects to pipe in first_dir
+        # NOTE: Pass local shape (flange.shape) not world shape (flange_shape)
+        # because _add_component applies world_transform to get world position
         self._add_component(
             component_type="flange",
             description="WN FLANGE",
             schedule_class="Class 300",
-            shape=flange_shape,
+            shape=flange.shape,
             world_transform=flange_transform,
             connected_directions=[first_dir_name]  # Pipe goes in this direction
         )
@@ -541,27 +543,39 @@ class PipeRoute:
         # Process each move
         for i, (dir_vec, dist_mm, dir_name) in enumerate(parsed_moves):
             is_last = (i == len(parsed_moves) - 1)
-            _is_first = (i == 0)  # Reserved for future use
 
             if self.debug:
                 print(f"\n--- Move {i+1}: {dir_name} {dist_mm:.1f}mm ---")
 
             # =====================================================================
-            # STEP 3: Calculate pipe length
+            # STEP 3: Calculate pipe length (CENTERLINE-BASED)
             # =====================================================================
+            # Distances are measured from reference points:
+            # - First segment: flange face (raised face) to elbow center
+            # - Middle segments: elbow center to elbow center
+            # - Last segment: elbow center to pipe end
+            is_first = (i == 0)
+            INCH_TO_MM = 25.4
 
-            # Start: after previous fitting's socket (with gap)
-            start_offset = EXPANSION_GAP_MM
-
-            # End: need space for next fitting (if any)
-            if is_last:
-                end_offset = 0
+            if is_first:
+                # First segment: from flange raised face to elbow center
+                # Flange offset = hub_length + raised_face_height (RF to weld port)
+                flange_offset = (self.flange_dims.hub_length + self.flange_dims.raised_face_height) * INCH_TO_MM
+                start_offset = flange_offset
             else:
-                # Need space for elbow: from pipe end to elbow center is elbow_A
-                # (pipe enters socket which is socket_depth, so center is at socket_depth from pipe end)
-                end_offset = elbow_A + EXPANSION_GAP_MM
+                # From previous elbow center (center_to_end = A dimension)
+                start_offset = elbow_A
 
-            pipe_length = dist_mm - start_offset - end_offset
+            if is_last:
+                # Last segment: elbow center to pipe end
+                end_offset = 0
+                gap_count = 1  # Only gap at start (after previous fitting)
+            else:
+                # To next elbow center
+                end_offset = elbow_A
+                gap_count = 2  # Gap at both ends
+
+            pipe_length = dist_mm - start_offset - end_offset - gap_count * EXPANSION_GAP_MM
 
             if pipe_length <= 0:
                 raise ValueError(
@@ -590,11 +604,13 @@ class PipeRoute:
             self.parts.append(pipe_shape)
 
             # Track pipe for BOM - pipe runs in the current direction
+            # NOTE: Pass local shape (pipe.shape) not world shape (pipe_shape)
+            # because _add_component applies world_transform to get world position
             self._add_component(
                 component_type="pipe",
                 description="PIPE",
                 schedule_class="Sch 40",
-                shape=pipe_shape,
+                shape=pipe.shape,
                 world_transform=pipe_transform,
                 length_mm=pipe_length,
                 pipe_direction=dir_name  # Direction the pipe runs (e.g., "east")
@@ -663,11 +679,12 @@ class PipeRoute:
                 # Track elbow for BOM - elbow connects pipes from dir_name and to next_dir_name
                 # The elbow has pipe coming FROM the opposite of dir_name (pipe travels in dir_name)
                 # and pipe going TO next_dir_name
+                # NOTE: Pass local shape (elbow.shape) not world shape (elbow_shape)
                 self._add_component(
                     component_type="elbow",
                     description="90° SW ELL",
                     schedule_class="Class 3000",
-                    shape=elbow_shape,
+                    shape=elbow.shape,
                     world_transform=final_elbow_transform,
                     connected_directions=[dir_name, next_dir_name]  # Pipes in these directions
                 )
@@ -775,32 +792,30 @@ class PipeRoute:
                 print(f"\n--- Move {i+1}: {dir_name} {dist_mm:.1f}mm ---")
 
             # =====================================================================
-            # Calculate pipe length for threaded connections
+            # Calculate pipe length for threaded connections (CENTERLINE-BASED)
             # =====================================================================
-            # For threaded: pipe screws into fittings on both ends
-            # Effective length = total distance - (thread engagement at start + thread engagement at end)
+            # Distances are measured from reference points:
+            # - First segment: pipe start to elbow center
+            # - Middle segments: elbow center to elbow center
+            # - Last segment: elbow center to pipe end
+            # No expansion gaps for threaded (pipe screws directly into fittings)
 
             if is_first:
-                # First pipe: no fitting at start (or could have one)
-                # Just the full distance minus fitting engagement at end
                 if is_last:
-                    # Only pipe, no fittings
+                    # Only pipe, no fittings - distance is pipe length
                     pipe_length = dist_mm
                 else:
-                    # First pipe to elbow: pipe end screws into elbow
-                    # Distance = pipe_length + elbow_A (elbow center to thread end)
-                    # So: pipe_length = distance - elbow_A
+                    # First segment: pipe start to elbow center
+                    # dist_mm = pipe_length + elbow_A
                     pipe_length = dist_mm - elbow_A
             else:
-                # Pipe between elbows or after elbow
-                # Start: coming from elbow outlet, pipe screws in
-                # End: if not last, goes to elbow inlet
                 if is_last:
-                    # Last pipe: comes from elbow, extends to free end
+                    # Last segment: elbow center to pipe end
+                    # dist_mm = elbow_A + pipe_length
                     pipe_length = dist_mm - elbow_A
                 else:
-                    # Middle pipe: between two elbows
-                    # Both ends have elbow connections
+                    # Middle segment: elbow center to elbow center
+                    # dist_mm = elbow_A + pipe_length + elbow_A
                     pipe_length = dist_mm - 2 * elbow_A
 
             if pipe_length <= 0:
@@ -843,11 +858,12 @@ class PipeRoute:
             self.parts.append(pipe_shape)
 
             # Track pipe for BOM
+            # NOTE: Pass local shape (pipe.shape) not world shape (pipe_shape)
             self._add_component(
                 component_type="pipe",
                 description="PIPE, NPT THREADED",
                 schedule_class="Sch 40",
-                shape=pipe_shape,
+                shape=pipe.shape,
                 world_transform=pipe_transform,
                 length_mm=pipe_length,
                 pipe_direction=dir_name
@@ -902,11 +918,12 @@ class PipeRoute:
                 self.parts.append(elbow_shape)
 
                 # Track elbow for BOM
+                # NOTE: Pass local shape (elbow.shape) not world shape (elbow_shape)
                 self._add_component(
                     component_type="elbow",
                     description="90° NPT THREADED ELL",
                     schedule_class="Class 3000",
-                    shape=elbow_shape,
+                    shape=elbow.shape,
                     world_transform=final_elbow_transform,
                     connected_directions=[dir_name, next_dir_name]
                 )

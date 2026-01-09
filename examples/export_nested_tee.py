@@ -21,26 +21,26 @@ def nested_tee_example():
     )
 
     builder.start_with_flange("west")
-    builder.add_pipe("6 in")
+    builder.add_pipe("10 in")
     builder.add_elbow("up", "bw")
-    builder.add_pipe("6 in")
+    builder.add_pipe("10 in")
 
     with builder.add_tee("east", "bw") as tee1:
         run = tee1.run()
         branch = tee1.branch()
-        
-        run.add_pipe("4 in")
-        branch.add_pipe("4 in")
+
+        run.add_pipe("10 in")
+        branch.add_pipe("10 in")
         branch.add_flange()
 
         with run.add_tee("east", "bw") as tee2:
             run2 = tee2.run()
             branch2 = tee2.branch()
 
-            run2.add_pipe("3 in")
+            run2.add_pipe("10 in")
             run2.add_elbow("west", "bw")
 
-            branch2.add_pipe("4 in")
+            branch2.add_pipe("10 in")
 
     # # Level 1 tee
     # with builder.add_tee(branch_direction="north") as tee1:
@@ -67,6 +67,7 @@ def main():
 
     print("Building nested tee example...")
     route = nested_tee_example()
+    route.export(str(output_dir / "nested_tee.step"))
 
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")

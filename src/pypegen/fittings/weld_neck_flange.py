@@ -63,9 +63,9 @@ ASME_B165_CLASS300_WN: dict[str, WeldNeckFlangeDims] = {
         hub_od_at_base=2.75, hub_od_at_weld=1.90, bore=1.61, num_bolts=4, bolt_hole_dia=0.875
     ),
     "2": WeldNeckFlangeDims(
-        nps="2", flange_od=6.50, flange_thickness=0.88, hub_length=3.00,
+        nps="2", flange_od=6.50, flange_thickness=0.81, hub_length=2.69,
         raised_face_od=3.62, raised_face_height=0.0625, bolt_circle=5.00,
-        hub_od_at_base=3.31, hub_od_at_weld=2.38, bore=2.07, num_bolts=8, bolt_hole_dia=0.75
+        hub_od_at_base=3.31, hub_od_at_weld=2.375, bore=2.07, num_bolts=8, bolt_hole_dia=0.75
     ),
     "2-1/2": WeldNeckFlangeDims(
         nps="2-1/2", flange_od=7.50, flange_thickness=1.00, hub_length=3.25,

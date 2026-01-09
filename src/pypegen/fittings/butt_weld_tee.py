@@ -67,10 +67,10 @@ ASME_B169_TEE: dict[str, ButtWeldTeeDims] = {
         center_to_end_branch=57.0,
     ),
     "2": ButtWeldTeeDims(
-        od=60.3,
-        wall_thickness=3.91,
-        center_to_end_run=64.0,
-        center_to_end_branch=64.0,
+        od=60.325,
+        wall_thickness=3.9116,
+        center_to_end_run=63.5,
+        center_to_end_branch=63.5,
     ),
     "2-1/2": ButtWeldTeeDims(
         od=73.0,

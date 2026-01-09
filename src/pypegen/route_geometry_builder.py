@@ -47,6 +47,7 @@ from .fittings.socket_weld_tee import ASME_B1611_TEE_CLASS3000, make_socket_weld
 from .fittings.weld_neck_flange import ASME_B165_CLASS300_WN
 from .pipe_router import (
     DIRECTIONS,
+    EXPANSION_GAP_MM,
     normalize_direction,
     parse_distance,
     rotation_to_align_z_with_direction,
@@ -89,6 +90,36 @@ except ImportError:
 def direction_name_to_vector(name: str) -> tuple[float, float, float]:
     """Convert a direction name to a unit vector."""
     return normalize_direction(name)
+
+
+def offset_transform_by_gap(
+    transform: np.ndarray,
+    direction: tuple[float, float, float],
+    gap: float = EXPANSION_GAP_MM,
+) -> np.ndarray:
+    """
+    Offset a transform by the weld gap distance in the given direction.
+
+    This creates space between mating ports for the weld gap.
+
+    Args:
+        transform: The 4x4 transformation matrix to offset
+        direction: Unit vector direction to offset in
+        gap: Distance to offset (default: EXPANSION_GAP_MM)
+
+    Returns:
+        New transform offset by gap in the given direction
+    """
+    offset = np.array([direction[0] * gap, direction[1] * gap, direction[2] * gap])
+    position = get_position(transform)
+    new_position = (position[0] + offset[0], position[1] + offset[1], position[2] + offset[2])
+
+    # Create new transform with offset position but same rotation
+    result = transform.copy()
+    result[0, 3] = new_position[0]
+    result[1, 3] = new_position[1]
+    result[2, 3] = new_position[2]
+    return result
 
 
 def vector_to_direction_name(vec: tuple[float, float, float]) -> str:
@@ -218,6 +249,7 @@ class RouteGeometryBuilder:
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
+        prev_fitting_type: str = "pipe",
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """
         Build geometry for a single node and recursively build children.
@@ -227,6 +259,7 @@ class RouteGeometryBuilder:
             incoming_transform: World transform for the inlet port
             incoming_direction: World direction the pipe was traveling
             up_vector: Current "up" reference direction (perpendicular to pipe)
+            prev_fitting_type: Type of previous fitting for centerline calculations
 
         Returns:
             Dictionary mapping port names to (transform, direction, up_vector) tuples
@@ -235,7 +268,7 @@ class RouteGeometryBuilder:
         if isinstance(node, FlangeNode):
             return self._build_flange(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, PipeSegmentNode):
-            return self._build_pipe(node, incoming_transform, incoming_direction, up_vector)
+            return self._build_pipe(node, incoming_transform, incoming_direction, up_vector, prev_fitting_type)
         elif isinstance(node, ElbowNode):
             return self._build_elbow(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, TeeNode):
@@ -349,20 +382,22 @@ class RouteGeometryBuilder:
         node._fitting = fitting
         node._built = True
 
-        # Compute outlet transform
+        # Compute outlet transform with weld gap offset
         weld_port = fitting.get_port("weld")
         outlet_transform = flange_transform @ weld_port.transform
+        # Add weld gap - offset in the flow direction
+        outlet_transform = offset_transform_by_gap(outlet_transform, direction)
 
         # Compute up-vector for this direction
         outlet_up = compute_initial_up_vector(direction)
 
         outlets = {"weld": (outlet_transform, direction, outlet_up)}
 
-        # Recursively build children
+        # Recursively build children - flange passes "flange" as prev_fitting_type
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="flange")
 
         return outlets
 
@@ -372,13 +407,113 @@ class RouteGeometryBuilder:
         incoming_transform: np.ndarray,
         incoming_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
+        prev_fitting_type: str = "pipe",
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
-        """Build a pipe segment."""
-        # Parse length
-        length_mm = parse_distance(node.length)
+        """Build a pipe segment with centerline-based length calculation."""
+        # Parse user-specified centerline distance
+        centerline_dist_mm = parse_distance(node.length)
 
-        # Create pipe
-        fitting = make_pipe(self.nps, length_mm)
+        # =====================================================================
+        # CENTERLINE-BASED PIPE LENGTH CALCULATION
+        # =====================================================================
+        # Distances are measured from reference points:
+        # - From flange: flange face (raised face) to fitting center
+        # - From elbow/tee/cross: fitting center to fitting center
+        # - To terminal: fitting center to pipe end
+
+        # Determine start offset based on previous fitting type
+        # Note: prev_fitting_type format is "type_weldtype" (e.g., "elbow_bw", "tee_branch_bw")
+        INCH_TO_MM = 25.4
+        # Parse prev_fitting_type: handle "tee_branch_bw" as type="tee_branch", weld="bw"
+        if prev_fitting_type.startswith("tee_branch"):
+            prev_type = "tee_branch"
+            prev_weld = prev_fitting_type.split("_")[-1] if "_" in prev_fitting_type else "sw"
+        else:
+            prev_parts = prev_fitting_type.split("_")
+            prev_type = prev_parts[0]
+            prev_weld = prev_parts[1] if len(prev_parts) > 1 else "sw"
+
+        if prev_type == "flange" and self.flange_dims is not None:
+            # First segment: from flange raised face to next fitting center
+            start_offset = (self.flange_dims.hub_length + self.flange_dims.raised_face_height) * INCH_TO_MM
+        elif prev_type == "elbow":
+            # From elbow center - use appropriate dimensions based on weld type
+            if prev_weld == "bw" and self.butt_weld_elbow_dims is not None:
+                start_offset = self.butt_weld_elbow_dims.center_to_end_lr
+            elif self.elbow_dims is not None:
+                start_offset = self.elbow_dims.center_to_end
+            else:
+                start_offset = 0.0
+        elif prev_type == "tee":
+            # From tee center (run direction)
+            if prev_weld == "bw" and self.butt_weld_tee_dims is not None:
+                start_offset = self.butt_weld_tee_dims.center_to_end_run
+            elif self.tee_dims is not None:
+                start_offset = self.tee_dims.center_to_end_run
+            else:
+                start_offset = 0.0
+        elif prev_type == "tee_branch":
+            # From tee center (branch direction)
+            if prev_weld == "bw" and self.butt_weld_tee_dims is not None:
+                start_offset = self.butt_weld_tee_dims.center_to_end_branch
+            elif self.tee_dims is not None:
+                start_offset = self.tee_dims.center_to_end_branch
+            else:
+                start_offset = 0.0
+        elif prev_type == "cross" and self.cross_dims is not None:
+            # From cross center
+            start_offset = self.cross_dims.center_to_end
+        else:
+            # Default: no offset (e.g., pipe to pipe)
+            start_offset = 0.0
+
+        # Determine end offset based on what comes next
+        next_node = node.children.get("end")
+        if isinstance(next_node, ElbowNode):
+            # Use appropriate elbow dimensions based on weld type
+            if next_node.weld_type == "bw" and self.butt_weld_elbow_dims is not None:
+                end_offset = self.butt_weld_elbow_dims.center_to_end_lr
+            elif self.elbow_dims is not None:
+                end_offset = self.elbow_dims.center_to_end
+            else:
+                end_offset = 0.0
+            gap_count = 2  # Gap at both ends
+        elif isinstance(next_node, TeeNode):
+            # Use appropriate tee dimensions based on weld type
+            if next_node.weld_type == "bw" and self.butt_weld_tee_dims is not None:
+                end_offset = self.butt_weld_tee_dims.center_to_end_run
+            elif self.tee_dims is not None:
+                end_offset = self.tee_dims.center_to_end_run
+            else:
+                end_offset = 0.0
+            gap_count = 2
+        elif isinstance(next_node, CrossNode) and self.cross_dims is not None:
+            end_offset = self.cross_dims.center_to_end
+            gap_count = 2
+        elif isinstance(next_node, FlangeNode) and self.flange_dims is not None:
+            # Pipe ends at flange - centerline is measured to flange face (raised face)
+            INCH_TO_MM = 25.4
+            end_offset = (self.flange_dims.hub_length + self.flange_dims.raised_face_height) * INCH_TO_MM
+            gap_count = 2  # Gap at both ends
+        elif isinstance(next_node, TerminalNode) or next_node is None:
+            # Terminal: pipe extends to end
+            end_offset = 0.0
+            gap_count = 1  # Only gap at start
+        else:
+            end_offset = 0.0
+            gap_count = 1
+
+        # Calculate actual pipe length
+        pipe_length = centerline_dist_mm - start_offset - end_offset - gap_count * EXPANSION_GAP_MM
+
+        if pipe_length <= 0:
+            raise ValueError(
+                f"Centerline distance {centerline_dist_mm:.1f}mm is too short for fittings. "
+                f"Minimum: {start_offset + end_offset + gap_count * EXPANSION_GAP_MM:.1f}mm"
+            )
+
+        # Create pipe with calculated length
+        fitting = make_pipe(self.nps, pipe_length)
 
         # Mate pipe's start port to incoming transform
         # The incoming_transform is already at the mating position
@@ -397,7 +532,7 @@ class RouteGeometryBuilder:
             schedule_class=f"Sch {node.schedule}",
             shape=fitting.shape,
             transform=pipe_transform,
-            length_mm=length_mm,
+            length_mm=pipe_length,
             pipe_direction=vector_to_direction_name(incoming_direction),
         )
 
@@ -406,9 +541,11 @@ class RouteGeometryBuilder:
         node._fitting = fitting
         node._built = True
 
-        # Compute outlet transform (at pipe end)
+        # Compute outlet transform (at pipe end) with weld gap offset
         end_port = fitting.get_port("end")
         outlet_transform = pipe_transform @ end_port.transform
+        # Add weld gap - offset in the flow direction
+        outlet_transform = offset_transform_by_gap(outlet_transform, incoming_direction)
 
         # Pipe doesn't change up-vector (no rotation around centerline)
         outlets = {"end": (outlet_transform, incoming_direction, up_vector)}
@@ -417,11 +554,11 @@ class RouteGeometryBuilder:
         for weldolet in node.weldolets:
             self._build_weldolet_on_pipe(weldolet, node, pipe_transform, incoming_direction, up_vector)
 
-        # Recursively build children
+        # Recursively build children - pipe passes "pipe" as prev_fitting_type
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="pipe")
 
         return outlets
 
@@ -505,20 +642,23 @@ class RouteGeometryBuilder:
         node._fitting = fitting
         node._built = True
 
-        # Compute outlet transform
+        # Compute outlet transform with weld gap offset
         outlet_port = fitting.get_port("outlet")
         outlet_transform = elbow_transform @ outlet_port.transform
+        # Add weld gap - offset in the turn direction
+        outlet_transform = offset_transform_by_gap(outlet_transform, turn_direction)
 
         # Compute new up-vector after the elbow turn
         outlet_up = compute_up_vector_after_elbow(incoming_direction, turn_direction, up_vector)
 
         outlets = {"outlet": (outlet_transform, turn_direction, outlet_up)}
 
-        # Recursively build children
+        # Recursively build children - elbow passes "elbow_{weld_type}" as prev_fitting_type
+        elbow_fitting_type = f"elbow_{node.weld_type}"
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type=elbow_fitting_type)
 
         return outlets
 
@@ -615,12 +755,15 @@ class RouteGeometryBuilder:
         node._fitting = fitting
         node._built = True
 
-        # Compute outlet transforms
+        # Compute outlet transforms with weld gap offsets
         run_port = fitting.get_port("run")
         branch_port = fitting.get_port("branch")
 
         run_outlet_transform = tee_transform @ run_port.transform
         branch_outlet_transform = tee_transform @ branch_port.transform
+        # Add weld gaps - offset in the respective flow directions
+        run_outlet_transform = offset_transform_by_gap(run_outlet_transform, incoming_direction)
+        branch_outlet_transform = offset_transform_by_gap(branch_outlet_transform, branch_direction)
 
         # Compute up-vectors for each outlet
         # Run continues in same direction, up-vector unchanged
@@ -633,11 +776,15 @@ class RouteGeometryBuilder:
             "branch": (branch_outlet_transform, branch_direction, branch_up),
         }
 
-        # Recursively build children
+        # Recursively build children - tee passes "tee_{weld_type}" or "tee_branch_{weld_type}"
+        tee_run_type = f"tee_{node.weld_type}"
+        tee_branch_type = f"tee_branch_{node.weld_type}"
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                # Use different fitting type for branch vs run
+                fitting_type = tee_branch_type if port_name == "branch" else tee_run_type
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type=fitting_type)
 
         return outlets
 
@@ -692,10 +839,18 @@ class RouteGeometryBuilder:
         node._fitting = fitting
         node._built = True
 
-        # Compute outlet transforms
+        # Compute outlet transforms with weld gap offsets
         run_port = fitting.get_port("run")
         left_port = fitting.get_port("branch_left")
         right_port = fitting.get_port("branch_right")
+
+        run_outlet_transform = cross_transform @ run_port.transform
+        left_outlet_transform = cross_transform @ left_port.transform
+        right_outlet_transform = cross_transform @ right_port.transform
+        # Add weld gaps - offset in the respective flow directions
+        run_outlet_transform = offset_transform_by_gap(run_outlet_transform, incoming_direction)
+        left_outlet_transform = offset_transform_by_gap(left_outlet_transform, left_dir)
+        right_outlet_transform = offset_transform_by_gap(right_outlet_transform, right_dir)
 
         # Compute up-vectors for each outlet
         run_up = up_vector  # Run continues same
@@ -703,16 +858,16 @@ class RouteGeometryBuilder:
         right_up = compute_up_vector_for_branch(incoming_direction, right_dir, up_vector)
 
         outlets = {
-            "run": (cross_transform @ run_port.transform, incoming_direction, run_up),
-            "branch_left": (cross_transform @ left_port.transform, left_dir, left_up),
-            "branch_right": (cross_transform @ right_port.transform, right_dir, right_up),
+            "run": (run_outlet_transform, incoming_direction, run_up),
+            "branch_left": (left_outlet_transform, left_dir, left_up),
+            "branch_right": (right_outlet_transform, right_dir, right_up),
         }
 
-        # Recursively build children
+        # Recursively build children - cross passes "cross" as prev_fitting_type
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="cross")
 
         return outlets
 
@@ -733,11 +888,11 @@ class RouteGeometryBuilder:
 
         outlets = {"branch": (incoming_transform, branch_direction, branch_up)}
 
-        # Recursively build children
+        # Recursively build children - weldolet passes "weldolet" as prev_fitting_type
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="weldolet")
 
         return outlets
 
@@ -790,12 +945,14 @@ class RouteGeometryBuilder:
         # Compute up-vector for the branch
         branch_up = compute_up_vector_for_branch(pipe_direction, branch_direction, up_vector)
 
-        # Build children from the weldolet branch
-        outlets = {"branch": (outlet_transform, branch_direction, branch_up)}
+        # Build children from the weldolet branch - passes "weldolet" as prev_fitting_type
+        # Add weld gap offset in the branch direction
+        outlet_with_gap = offset_transform_by_gap(outlet_transform, branch_direction)
+        outlets = {"branch": (outlet_with_gap, branch_direction, branch_up)}
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="weldolet")
 
     def _build_reducer(
         self,
@@ -811,10 +968,11 @@ class RouteGeometryBuilder:
 
         outlets = {"outlet": (incoming_transform, incoming_direction, up_vector)}
 
+        # Reducer passes "reducer" as prev_fitting_type
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
-                self._build_node(child, transform, dir_vec, up_vec)
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="reducer")
 
         return outlets
 
