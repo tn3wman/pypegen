@@ -607,7 +607,7 @@ class RouteGeometryBuilder:
         # Track fitting and add coordinate frame markers if enabled
         self._add_fitting_with_markers(fitting, elbow_transform)
 
-        # Track welds - inlet and outlet
+        # Track welds - inlet always, outlet only if there's a child connected
         weld_type_str = "SW" if node.weld_type == "sw" else "BW"
         incoming_dir_name = vector_to_direction_name(incoming_direction)
         turn_dir_name = node.turn_direction
@@ -623,19 +623,21 @@ class RouteGeometryBuilder:
             avoid_direction=turn_dir_name,
         )
 
-        # Outlet weld: avoid direction is where we came from (opposite of incoming)
-        opposite_incoming = vector_to_direction_name(
-            (-incoming_direction[0], -incoming_direction[1], -incoming_direction[2])
-        )
-        self._add_weld(
-            weld_type=weld_type_str,
-            description="ELBOW TO PIPE",
-            fitting=fitting,
-            port_name="outlet",
-            transform=elbow_transform,
-            pipe_direction=turn_dir_name,
-            avoid_direction=opposite_incoming,
-        )
+        # Outlet weld: only add if there's a pipe/fitting connected to the outlet
+        # (no weld needed if elbow is at the end of a run with no continuation)
+        if "outlet" in node.children and node.children["outlet"] is not None:
+            opposite_incoming = vector_to_direction_name(
+                (-incoming_direction[0], -incoming_direction[1], -incoming_direction[2])
+            )
+            self._add_weld(
+                weld_type=weld_type_str,
+                description="ELBOW TO PIPE",
+                fitting=fitting,
+                port_name="outlet",
+                transform=elbow_transform,
+                pipe_direction=turn_dir_name,
+                avoid_direction=opposite_incoming,
+            )
 
         # Store transform on node
         node._world_transform = elbow_transform
@@ -1418,10 +1420,13 @@ class RouteGeometryBuilder:
         avoid_direction: str | None = None,
     ) -> str:
         """
-        Select the best weld attachment point based on pipe direction and weld type.
+        Select the best weld attachment point based on pipe direction and isometric visibility.
 
-        For butt welds (BW): Prefer front side (north for E-W pipes, visible in iso view)
-        For socket welds (SW): Prefer south/back side (to avoid crossing connected fittings)
+        Weld markers should be placed on the VISIBLE side in isometric view:
+        - Isometric view is from direction (1, 1, 1), looking toward origin
+        - For E-W pipes: prefer down or south attachment
+        - For vertical pipes (up/down): prefer down attachment
+        - For branch ports (going east): prefer east attachment
 
         Args:
             fitting: The Fitting object with attachment points
@@ -1439,25 +1444,24 @@ class RouteGeometryBuilder:
             # Fallback to port position if no attachment points
             return ""
 
-        # Define preference order based on weld type and pipe direction
+        # Define preference order based on pipe direction and isometric visibility
         pipe_dir = pipe_direction.lower()
 
-        if weld_type == "BW":
-            # Butt welds: prefer front side (north for E-W pipes, east for N-S pipes)
-            if pipe_dir in ("east", "west"):
-                preference = ["north", "up", "south", "down"]
-            elif pipe_dir in ("north", "south"):
-                preference = ["east", "up", "west", "down"]
-            else:  # up/down
-                preference = ["north", "east", "south", "west"]
-        else:
-            # Socket welds: attach at back/bottom to avoid crossing connected fittings
-            if pipe_dir in ("east", "west"):
-                preference = ["down", "south", "up", "north"]
-            elif pipe_dir in ("north", "south"):
-                preference = ["down", "west", "up", "east"]
-            else:  # up/down
-                preference = ["west", "down", "east", "up"]
+        # For weld markers, prefer the visible/downward side in isometric view
+        if pipe_dir in ("east", "west"):
+            # E-W pipes: prefer down, then south (both visible in iso)
+            preference = ["down", "south", "up", "north"]
+        elif pipe_dir in ("north", "south"):
+            # N-S pipes: prefer down, then west (visible in iso)
+            preference = ["down", "west", "up", "east"]
+        else:  # up/down (vertical pipes)
+            # Vertical pipes: prefer down attachment (visible in iso view)
+            preference = ["down", "south", "west", "north", "east", "up"]
+
+        # Special case for branch ports (like tee branch going east)
+        # Use east attachment point for branches going east
+        if port_name == "branch" and pipe_dir == "east":
+            preference = ["east", "down", "south", "west", "north", "up"]
 
         # If we have an avoid direction, move it to the end of preference
         if avoid_direction:
@@ -1503,6 +1507,18 @@ class RouteGeometryBuilder:
             fitting, port_name, pipe_direction, weld_type, avoid_direction
         )
 
+        # Extract attachment direction from attachment name (e.g., "inlet_weld_down" -> "down")
+        attachment_direction: str | None = None
+        if attachment_name:
+            # Parse the direction from the attachment name
+            # Format is typically "{port}_weld_{direction}" or "{port}_{direction}"
+            parts = attachment_name.split("_")
+            if len(parts) >= 2:
+                # Last part is the direction (up, down, north, south, east, west)
+                direction = parts[-1].lower()
+                if direction in ("up", "down", "north", "south", "east", "west"):
+                    attachment_direction = direction
+
         # Get weld position from attachment point (preferred) or port (fallback)
         if attachment_name:
             weld_pos = fitting.get_attachment_point_world_position(attachment_name, transform)
@@ -1522,6 +1538,7 @@ class RouteGeometryBuilder:
                 world_position_3d=weld_pos,
                 pipe_direction=pipe_direction,
                 avoid_direction=avoid_direction,
+                attachment_direction=attachment_direction,
                 pipe_radius_mm=pipe_radius,
             )
         )

@@ -253,6 +253,10 @@ class WeldRecord:
     # e.g., if the next pipe goes "up", avoid placing marker upward
     avoid_direction: str | None = None
 
+    # Attachment point direction (up, down, east, west, north, south)
+    # Used to determine label direction in drawing
+    attachment_direction: str | None = None
+
     # Pipe outer radius in mm (for computing edge position)
     pipe_radius_mm: float | None = None
 
@@ -679,32 +683,219 @@ def compute_pipe_perpendicular_screen_direction(pipe_direction: str) -> tuple[fl
     cos30 = math.cos(angle_30)  # ≈ 0.866
     sin30 = math.sin(angle_30)  # ≈ 0.5
 
-    # Actual screen directions for each world axis (in SVG coordinates where +Y is down)
-    # These match the axis indicator in the drawing
-    PIPE_AXIS_SCREEN = {
-        "east":  (cos30, sin30),    # 30° below horizontal (right and down)
-        "west":  (-cos30, -sin30),  # opposite of east (left and up)
-        "north": (cos30, -sin30),   # 30° above horizontal (right and up)
-        "south": (-cos30, sin30),   # opposite of north (left and down)
-        "up":    (0.0, -1.0),       # straight up (vertical)
-        "down":  (0.0, 1.0),        # straight down (vertical)
-    }
-
     pipe_dir = pipe_direction.lower()
-    if pipe_dir not in PIPE_AXIS_SCREEN:
-        return (0.0, -1.0)  # Default to screen up
 
     # Use consistent isometric directions for balloon/weld placement
-    # instead of computed perpendiculars for cleaner visual alignment
+    # based on pipe direction and isometric visibility
     if pipe_dir in ("up", "down"):
-        # Vertical pipes: use isometric "east" direction (right and down)
-        return (cos30, sin30)  # East: (0.866, 0.5)
+        # Vertical pipes: prefer WEST direction (left-up on screen)
+        # This keeps balloons away from typical east-facing branches
+        return (-cos30, -sin30)  # West: (-0.866, -0.5)
     elif pipe_dir in ("east", "west"):
         # E-W pipes: use isometric "north" direction (right and up)
+        # North is the visible front side in isometric view
         return (cos30, -sin30)  # North: (0.866, -0.5)
     else:
         # N-S pipes: use isometric "east" direction (right and down)
         return (cos30, sin30)  # East: (0.866, 0.5)
+
+
+def compute_elbow_balloon_direction(
+    incoming_direction: str,
+    turn_direction: str
+) -> str:
+    """
+    Compute the best balloon direction for an elbow based on its turn.
+
+    The balloon should point toward the "outside" of the bend, which is
+    perpendicular to the plane of the elbow and visible in isometric view.
+
+    Args:
+        incoming_direction: Direction the pipe was coming from (e.g., "east")
+        turn_direction: Direction the pipe turns to (e.g., "up")
+
+    Returns:
+        World direction for balloon placement (e.g., "south", "north")
+    """
+    inc = incoming_direction.lower()
+    turn = turn_direction.lower()
+
+    # The elbow lies in a plane defined by incoming and turn directions
+    # The balloon should be perpendicular to this plane, on the visible side
+
+    # Horizontal to vertical elbows (E-W to up/down)
+    if inc in ("east", "west") and turn in ("up", "down"):
+        # Elbow in the east-vertical plane: balloon goes south (visible in iso)
+        return "south"
+    if turn in ("east", "west") and inc in ("up", "down"):
+        # Same plane but reversed: balloon goes north (visible in iso)
+        return "north"
+
+    # Vertical to horizontal elbows (up/down to N-S or E-W)
+    if inc in ("up", "down") and turn in ("north", "south"):
+        # Elbow in the vertical-NS plane: balloon goes east (visible)
+        return "east"
+    if turn in ("up", "down") and inc in ("north", "south"):
+        # Same plane reversed
+        return "west"
+
+    # Horizontal plane elbows (E-W to N-S)
+    if inc in ("east", "west") and turn in ("north", "south"):
+        # Elbow in horizontal plane: balloon goes up
+        return "up"
+    if inc in ("north", "south") and turn in ("east", "west"):
+        # Same plane reversed
+        return "up"
+
+    # Default fallback
+    return "north"
+
+
+def compute_tee_balloon_direction(
+    run_direction: str,
+    branch_direction: str
+) -> str:
+    """
+    Compute the best balloon direction for a tee.
+
+    The balloon should point away from the branch to avoid overlapping
+    with branch pipes.
+
+    Args:
+        run_direction: Direction of the main run (e.g., "up")
+        branch_direction: Direction of the branch (e.g., "east")
+
+    Returns:
+        World direction for balloon placement
+    """
+    run = run_direction.lower()
+    branch = branch_direction.lower()
+
+    # For vertical runs with horizontal branches, go opposite to branch
+    if run in ("up", "down"):
+        if branch == "east":
+            return "west"
+        elif branch == "west":
+            return "east"
+        elif branch == "north":
+            return "south"
+        elif branch == "south":
+            return "north"
+
+    # For horizontal runs with vertical branches
+    if run in ("east", "west"):
+        if branch == "up":
+            return "down"
+        elif branch == "down":
+            return "up"
+        elif branch == "north":
+            return "south"
+        elif branch == "south":
+            return "north"
+
+    # Default: prefer north (visible in isometric)
+    return "north"
+
+
+def compute_flange_balloon_direction(connected_direction: str) -> str:
+    """
+    Compute the best balloon direction for a flange.
+
+    The balloon should be perpendicular to the connected pipe direction
+    and on the visible side in isometric view.
+
+    Args:
+        connected_direction: Direction of the connected pipe
+
+    Returns:
+        World direction for balloon placement
+    """
+    conn = connected_direction.lower()
+
+    # For E-W connected pipes, balloon goes north (front visible side)
+    if conn in ("east", "west"):
+        return "north"
+
+    # For N-S connected pipes, balloon goes east (visible)
+    if conn in ("north", "south"):
+        return "east"
+
+    # For vertical connected pipes, balloon goes north
+    if conn in ("up", "down"):
+        return "north"
+
+    return "north"
+
+
+def compute_weld_label_screen_direction(
+    pipe_direction: str,
+    attachment_direction: str | None = None,
+    avoid_direction: str | None = None
+) -> tuple[float, float]:
+    """
+    Compute the screen direction for weld marker labels.
+
+    Weld labels should generally point toward the viewer in isometric view,
+    which is the "south" direction (left-down on screen).
+
+    Special cases:
+    - If attachment is on "up" side, label points north (away from pipe)
+    - If attachment is on "east" side for horizontal branches, label points north
+    - If pipe is vertical and avoid_direction is horizontal (elbow at top), label points north
+
+    Args:
+        pipe_direction: World direction of pipe axis ("east", "north", "up", etc.)
+        attachment_direction: Direction of attachment point ("up", "down", "north", etc.)
+        avoid_direction: Direction to avoid (where next fitting/pipe is)
+
+    Returns:
+        (dx, dy) normalized screen direction for weld label
+    """
+    # Standard isometric angle
+    angle_30 = math.radians(30)
+    cos30 = math.cos(angle_30)  # ≈ 0.866
+    sin30 = math.sin(angle_30)  # ≈ 0.5
+
+    # Screen directions for each world direction
+    SCREEN_DIRS = {
+        "north": (cos30, -sin30),    # Right-up
+        "south": (-cos30, sin30),    # Left-down
+        "east": (cos30, sin30),      # Right-down
+        "west": (-cos30, -sin30),    # Left-up
+        "up": (0.0, -1.0),           # Straight up
+        "down": (0.0, 1.0),          # Straight down
+    }
+
+    pipe_dir = pipe_direction.lower() if pipe_direction else "east"
+    avoid_dir = avoid_direction.lower() if avoid_direction else None
+
+    # Handle special cases based on attachment direction
+    if attachment_direction:
+        attach = attachment_direction.lower()
+
+        # If attached on "east" side (for branches), label points north
+        # This keeps branch weld labels visible and consistent
+        if attach == "east":
+            return SCREEN_DIRS["north"]
+
+        # If attached on "north" side, label points north
+        if attach == "north":
+            return SCREEN_DIRS["north"]
+
+        # "up" attachments point south (consistent with other vertical pipe welds)
+        if attach == "up":
+            return SCREEN_DIRS["south"]
+
+    # Default: labels point south (toward viewer in isometric)
+    if pipe_dir in ("up", "down"):
+        # Vertical pipes: label points south
+        return SCREEN_DIRS["south"]
+    elif pipe_dir in ("east", "west"):
+        # E-W pipes: label points south
+        return SCREEN_DIRS["south"]
+    else:
+        # N-S pipes: label points down (toward viewer)
+        return SCREEN_DIRS["down"]
 
 
 # =============================================================================
@@ -1017,6 +1208,12 @@ class TopologyBalloonPlacer:
         """
         Place a balloon for a component using topology information.
 
+        Uses smart placement algorithms based on component type:
+        - Pipes: Perpendicular to pipe axis, preferring west for vertical runs
+        - Elbows: Perpendicular to elbow plane, on visible side
+        - Tees: Away from branch direction
+        - Flanges: Perpendicular to connected pipe, on visible side
+
         Args:
             comp: The ComponentRecord with connection info
             screen_center: Approximate screen center of the component
@@ -1028,10 +1225,14 @@ class TopologyBalloonPlacer:
         # Get geometry points if available (for accurate edge finding)
         geometry_points = comp.svg_geometry_points if comp.svg_geometry_points else None
 
-        # For pipes, use perpendicular-to-axis direction computed via linear algebra
+        # Determine preferred directions based on component type
+        preferred_dirs: list[str] = []
+        use_center_attachment = False
+
         if comp.component_type == "pipe" and comp.pipe_direction:
-            # Compute the exact perpendicular direction to the pipe's visual axis
+            # For pipes, compute perpendicular direction based on pipe axis
             perp_dir = compute_pipe_perpendicular_screen_direction(comp.pipe_direction)
+            use_center_attachment = True
 
             # Try placing with computed perpendicular direction
             balloon = self._try_place_with_screen_direction(
@@ -1056,27 +1257,51 @@ class TopologyBalloonPlacer:
 
             # Fallback to discrete directions
             preferred_dirs = get_perpendicular_directions(comp.pipe_direction)
-        elif comp.component_type == "elbow" and comp.connected_directions:
-            # For elbows, place balloon at the OUTSIDE corner of the bend
-            # The outside corner is in the direction of the first connected pipe (inlet)
-            # For an elbow going east→up, the outside corner is toward east
-            preferred_dirs = list(comp.connected_directions)  # Use connected dirs, not free dirs
+
+        elif comp.component_type == "elbow" and len(comp.connected_directions) >= 2:
+            # For elbows, use smart direction based on inlet/outlet
+            incoming = comp.connected_directions[0]  # First is inlet direction
+            turn = comp.connected_directions[1]      # Second is outlet direction
+            best_dir = compute_elbow_balloon_direction(incoming, turn)
+            preferred_dirs = [best_dir]
+            # Also try free directions as fallback
+            free_dirs = get_free_directions(comp.connected_directions)
+            preferred_dirs.extend([d for d in free_dirs if d != best_dir])
+            use_center_attachment = True  # Connect at center for elbows
+
+        elif comp.component_type == "tee" and len(comp.connected_directions) >= 3:
+            # For tees, use smart direction based on run/branch
+            # connected_directions typically has: [incoming, run, branch]
+            run_dir = comp.connected_directions[1] if len(comp.connected_directions) > 1 else "up"
+            branch_dir = comp.connected_directions[2] if len(comp.connected_directions) > 2 else "east"
+            best_dir = compute_tee_balloon_direction(run_dir, branch_dir)
+            preferred_dirs = [best_dir]
+            free_dirs = get_free_directions(comp.connected_directions)
+            preferred_dirs.extend([d for d in free_dirs if d != best_dir])
+            use_center_attachment = True  # Connect at center for tees
+
+        elif comp.component_type == "flange" and comp.connected_directions:
+            # For flanges, use smart direction based on connected pipe
+            connected = comp.connected_directions[0]
+            best_dir = compute_flange_balloon_direction(connected)
+            preferred_dirs = [best_dir]
+            free_dirs = get_free_directions(comp.connected_directions)
+            preferred_dirs.extend([d for d in free_dirs if d != best_dir])
+
         elif comp.connected_directions:
-            # For other fittings (flanges, etc.), prefer directions not occupied by connections
+            # For other fittings, prefer directions not occupied by connections
             preferred_dirs = get_free_directions(comp.connected_directions)
+
         else:
             # Fallback: prefer vertical then horizontal
             preferred_dirs = ["up", "down", "north", "south", "east", "west"]
-
-        # For non-pipes or as fallback, use discrete world directions
-        is_pipe = comp.component_type == "pipe"
 
         # Try each preferred direction
         for world_dir in preferred_dirs:
             balloon = self._try_place_in_direction(
                 comp.item_number, screen_center, screen_bounds, world_dir,
                 geometry_points=geometry_points,
-                use_center_attachment=is_pipe
+                use_center_attachment=use_center_attachment
             )
             if balloon:
                 self.placed_balloons.append(balloon)
@@ -1089,7 +1314,7 @@ class TopologyBalloonPlacer:
                 balloon = self._try_place_in_direction(
                     comp.item_number, screen_center, screen_bounds, world_dir,
                     geometry_points=geometry_points,
-                    use_center_attachment=is_pipe
+                    use_center_attachment=use_center_attachment
                 )
                 if balloon:
                     self.placed_balloons.append(balloon)

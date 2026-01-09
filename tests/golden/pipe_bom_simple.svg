@@ -470,21 +470,21 @@
 
     <g class="balloon" data-item="1">
         <!-- Leader line -->
-        <line x1="116.05" y1="50.26"
-              x2="116.05" y2="42.26"
+        <line x1="130.20" y1="58.48"
+              x2="137.13" y2="54.48"
               stroke="#000000" stroke-width="0.25"/>
 
         <!-- Attachment dot -->
-        <circle cx="116.05" cy="50.26" r="0.8"
+        <circle cx="130.20" cy="58.48" r="0.8"
                 fill="#000000"/>
 
         <!-- Balloon circle -->
-        <circle cx="116.05" cy="38.26" r="4.00"
+        <circle cx="140.59" cy="52.48" r="4.00"
                 fill="white" stroke="#000000"
                 stroke-width="0.35"/>
 
         <!-- Item number -->
-        <text x="116.05" y="39.31"
+        <text x="140.59" y="53.53"
               text-anchor="middle" font-family="Arial"
               font-size="3.0" font-weight="bold">
             1
@@ -518,21 +518,21 @@
 
     <g class="balloon" data-item="3">
         <!-- Leader line -->
-        <line x1="341.64" y1="212.09"
-              x2="348.56" y2="216.09"
+        <line x1="326.02" y1="202.50"
+              x2="319.09" y2="206.50"
               stroke="#000000" stroke-width="0.25"/>
 
         <!-- Attachment dot -->
-        <circle cx="341.64" cy="212.09" r="0.8"
+        <circle cx="326.02" cy="202.50" r="0.8"
                 fill="#000000"/>
 
         <!-- Balloon circle -->
-        <circle cx="352.03" cy="218.09" r="4.00"
+        <circle cx="315.63" cy="208.50" r="4.00"
                 fill="white" stroke="#000000"
                 stroke-width="0.35"/>
 
         <!-- Item number -->
-        <text x="352.03" y="219.14"
+        <text x="315.63" y="209.55"
               text-anchor="middle" font-family="Arial"
               font-size="3.0" font-weight="bold">
             3
@@ -542,21 +542,21 @@
 
     <g class="balloon" data-item="4">
         <!-- Leader line -->
-        <line x1="342.67" y1="120.23"
-              x2="349.60" y2="124.23"
+        <line x1="321.62" y1="108.00"
+              x2="314.69" y2="104.00"
               stroke="#000000" stroke-width="0.25"/>
 
         <!-- Attachment dot -->
-        <circle cx="342.67" cy="120.23" r="0.8"
+        <circle cx="321.62" cy="108.00" r="0.8"
                 fill="#000000"/>
 
         <!-- Balloon circle -->
-        <circle cx="353.06" cy="126.23" r="4.00"
+        <circle cx="311.23" cy="102.00" r="4.00"
                 fill="white" stroke="#000000"
                 stroke-width="0.35"/>
 
         <!-- Item number -->
-        <text x="353.06" y="127.28"
+        <text x="311.23" y="103.05"
               text-anchor="middle" font-family="Arial"
               font-size="3.0" font-weight="bold">
             4
@@ -568,51 +568,51 @@
 
         <g class="weld-marker" id="weld-1">
             <!-- Leader line -->
-            <line x1="131.2024980249695" y1="81.96734832974721" x2="140.7287774665983" y2="74.96734832974721"
+            <line x1="131.2024980249695" y1="81.96734832974721" x2="121.67621858334066" y2="88.96734832974721"
                   stroke="#000000" stroke-width="0.3"/>
             <!-- Weld point dot -->
             <circle cx="131.2024980249695" cy="81.96734832974721" r="0.8"
                     fill="#000000"/>
             <!-- Slot background (stadium/pill shape) -->
-            <rect x="139.79095529308938" y="68.96734832974721" width="14.0" height="8.0"
+            <rect x="108.61404075684959" y="86.96734832974721" width="14.0" height="8.0"
                   rx="4.0" ry="4.0"
                   fill="white" stroke="#000000" stroke-width="0.3"/>
             <!-- Weld label -->
-            <text x="146.79095529308938" y="73.84234832974721"
+            <text x="115.61404075684959" y="91.84234832974721"
                   text-anchor="middle" font-family="Arial" font-size="2.5"
                   font-weight="bold">WELD 1</text>
         </g>
 
         <g class="weld-marker" id="weld-2">
             <!-- Leader line -->
-            <line x1="311.24968458253016" y1="203.2676455925724" x2="301.72381795093133" y2="210.26760159112035"
+            <line x1="311.24968458253016" y1="203.2676455925724" x2="301.7234051409013" y2="210.2676455925724"
                   stroke="#000000" stroke-width="0.3"/>
             <!-- Weld point dot -->
             <circle cx="311.24968458253016" cy="203.2676455925724" r="0.8"
                     fill="#000000"/>
             <!-- Slot background (stadium/pill shape) -->
-            <rect x="288.66168458253014" y="208.2676455925724" width="14.0" height="8.0"
+            <rect x="288.66122731441027" y="208.2676455925724" width="14.0" height="8.0"
                   rx="4.0" ry="4.0"
                   fill="white" stroke="#000000" stroke-width="0.3"/>
             <!-- Weld label -->
-            <text x="295.66168458253014" y="213.1426455925724"
+            <text x="295.66122731441027" y="213.1426455925724"
                   text-anchor="middle" font-family="Arial" font-size="2.5"
                   font-weight="bold">WELD 2</text>
         </g>
 
         <g class="weld-marker" id="weld-3">
             <!-- Leader line -->
-            <line x1="339.73992057253344" y1="195.57394570017192" x2="349.26578720413227" y2="202.57390169871988"
+            <line x1="339.73992057253344" y1="195.57394570017192" x2="330.2136411309046" y2="202.57394570017192"
                   stroke="#000000" stroke-width="0.3"/>
             <!-- Weld point dot -->
             <circle cx="339.73992057253344" cy="195.57394570017192" r="0.8"
                     fill="#000000"/>
             <!-- Slot background (stadium/pill shape) -->
-            <rect x="348.32792057253346" y="200.57394570017192" width="14.0" height="8.0"
+            <rect x="317.15146330441354" y="200.57394570017192" width="14.0" height="8.0"
                   rx="4.0" ry="4.0"
                   fill="white" stroke="#000000" stroke-width="0.3"/>
             <!-- Weld label -->
-            <text x="355.32792057253346" y="205.44894570017192"
+            <text x="324.15146330441354" y="205.44894570017192"
                   text-anchor="middle" font-family="Arial" font-size="2.5"
                   font-weight="bold">WELD 3</text>
         </g>

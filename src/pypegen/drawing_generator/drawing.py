@@ -1233,7 +1233,7 @@ class PipingDrawing:
 
         print("\n--- Placing Weld Markers (using attachment point positions) ---")
 
-        from .bom import WELD_MARKER_OFFSET, WELD_MARKER_SIZE, WORLD_DIR_TO_SCREEN_OFFSET, WeldMarker, compute_pipe_perpendicular_screen_direction, render_weld_markers_svg
+        from .bom import WELD_MARKER_OFFSET, WELD_MARKER_SIZE, WORLD_DIR_TO_SCREEN_OFFSET, WeldMarker, compute_weld_label_screen_direction, render_weld_markers_svg
 
         markers = []
         debug_markers = []  # Debug visualization of weld positions
@@ -1267,19 +1267,18 @@ class PipingDrawing:
                 )
 
             # Get screen direction for label placement
-            if weld.weld_type == "SW":
-                # Socket welds: leader extends perpendicular to pipe
-                if weld.pipe_direction in ("up", "down"):
-                    # Vertical pipes: leader extends east (right on screen)
-                    screen_perp = WORLD_DIR_TO_SCREEN_OFFSET.get("east", (0.866, 0.5))
-                else:
-                    # Horizontal pipes (E-W, N-S): leader extends south
-                    screen_perp = WORLD_DIR_TO_SCREEN_OFFSET.get("south", (-0.866, 0.5))
-            elif weld.pipe_direction:
-                # Butt welds: use perpendicular to pipe direction
-                screen_perp = compute_pipe_perpendicular_screen_direction(weld.pipe_direction)
+            # Weld labels should point toward the viewer (south direction in isometric)
+            # unless the attachment is on a special side (up, east, north)
+            # or it's at an elbow turning from vertical to horizontal
+            if weld.pipe_direction:
+                screen_perp = compute_weld_label_screen_direction(
+                    weld.pipe_direction,
+                    weld.attachment_direction,
+                    weld.avoid_direction
+                )
             else:
-                screen_perp = (0.5, -0.866)
+                # Default: south direction (toward viewer)
+                screen_perp = (-0.866, 0.5)
 
             # Compute label position from weld point
             dx, dy = screen_perp
@@ -1289,12 +1288,16 @@ class PipingDrawing:
             best_weld_pos = (weld_x, weld_y)
             best_label_pos = (label_x, label_y)
 
+            # Check if this attachment direction should never be flipped
+            # Attachments on up, east, or north side should keep their north-pointing labels
+            never_flip = weld.attachment_direction in ("up", "east", "north")
+
             # Check bounds
             margin = WELD_MARKER_SIZE * 1.5
             in_bounds = is_point_in_bounds(label_x, label_y, margin, self._model_view_area)
 
-            if not in_bounds:
-                # Try opposite direction
+            if not in_bounds and not never_flip:
+                # Try opposite direction (only if allowed to flip)
                 label_x = weld_x - dx * WELD_MARKER_OFFSET
                 label_y = weld_y - dy * WELD_MARKER_OFFSET
                 in_bounds = is_point_in_bounds(label_x, label_y, margin, self._model_view_area)
@@ -1306,6 +1309,9 @@ class PipingDrawing:
             # Check overlap with existing markers and try alternative position if needed
             for px, py in placed_positions:
                 if math.sqrt((best_label_pos[0] - px)**2 + (best_label_pos[1] - py)**2) < WELD_MARKER_SIZE * 3:
+                    if never_flip:
+                        # Don't flip these, just accept the overlap
+                        break
                     # Try opposite direction
                     alt_label_x = weld_x - dx * WELD_MARKER_OFFSET
                     alt_label_y = weld_y - dy * WELD_MARKER_OFFSET
