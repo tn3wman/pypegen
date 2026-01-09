@@ -191,14 +191,26 @@ class ComponentRecord:
         )
 
     def set_world_position_from_shape(self):
-        """Compute and store the 3D world position from the shape's bounding box."""
+        """Compute and store the 3D world position from the shape's bounding box.
+
+        Applies world_transform to get the correct world position.
+        The shape is stored in local coordinates, so we need to transform
+        the local bounding box center to get the world position.
+        """
         if self.shape is not None:
             bb = self.shape.BoundingBox()
-            self.world_position_3d = (
+            local_center = np.array([
                 (bb.xmin + bb.xmax) / 2,
                 (bb.ymin + bb.ymax) / 2,
-                (bb.zmin + bb.zmax) / 2
-            )
+                (bb.zmin + bb.zmax) / 2,
+                1.0  # homogeneous coordinate
+            ])
+
+            if self.world_transform is not None:
+                world_center = self.world_transform @ local_center
+                self.world_position_3d = (world_center[0], world_center[1], world_center[2])
+            else:
+                self.world_position_3d = (local_center[0], local_center[1], local_center[2])
 
     @property
     def size_display(self) -> str:

@@ -49,6 +49,7 @@ import cadquery as cq
 import numpy as np
 
 # Import butt weld tee
+from .butt_weld_elbow import ASME_B169_ELBOW90, make_butt_weld_elbow_90
 from .butt_weld_tee import ASME_B169_TEE, make_butt_weld_tee
 from .socket_weld_elbow import (
     ASME_B1611_ELBOW45_CLASS3000,
@@ -950,6 +951,111 @@ def make_socket_weld_elbow_45(nps: str, units: str = "mm") -> Fitting:  # noqa: 
 
 
 # =============================================================================
+# BUTT WELD ELBOW
+# =============================================================================
+
+
+def make_butt_weld_elbow_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create a butt weld 90° elbow with defined ports.
+
+    Coordinate system (original butt weld geometry):
+    - Arc centered at origin, from (A, 0, 0) to (0, A, 0)
+    - At (A, 0, 0): tangent is +Y, so pipe connects along Y axis
+    - At (0, A, 0): tangent is -X, so pipe connects along X axis
+
+    Ports:
+    - "inlet": At (A, 0, 0), pipe extends in -Y direction
+    - "outlet": At (0, A, 0), pipe extends in -X direction
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    """
+    dims = ASME_B169_ELBOW90.get(nps)
+    if dims is None:
+        raise ValueError(f"No butt weld elbow dimensions for NPS {nps}")
+
+    # Dimensions (in mm)
+    A = dims.center_to_end_lr  # Center to end (long radius) = bend radius
+    r_outer = dims.od / 2.0  # Outer radius for attachment points
+
+    # Get original butt weld elbow shape (arc centered at origin)
+    elbow_shape = make_butt_weld_elbow_90(nps, radius_type="LR")
+
+    # Define ports matching the actual geometry face orientations:
+    #
+    # Original butt weld elbow geometry:
+    # - Arc goes counterclockwise from (A, 0, 0) to (0, A, 0)
+    # - At (A, 0, 0): tangent is +Y, face perpendicular to Y
+    # - At (0, A, 0): tangent is -X, face perpendicular to X
+    #
+    # Port Z points toward where connecting pipe body extends:
+    # - Inlet at (A, 0, 0): pipe body extends in -Y direction (opposite arc direction)
+    # - Outlet at (0, A, 0): pipe body extends in -X direction (along arc tangent)
+
+    ports = {}
+
+    # Inlet port: at (A, 0, 0), pipe connects along Y axis
+    # Z-axis points -Y (opposite of arc tangent direction at inlet)
+    # The arc tangent at inlet is +Y (flow direction into elbow)
+    # Port Z points opposite to flow = toward incoming pipe body
+    # rotation_matrix_x(90) rotates Z from +Z to -Y
+    inlet_transform = translation_matrix(A, 0, 0) @ rotation_matrix_x(90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Outlet port: at (0, A, 0), pipe connects along X axis
+    # Z-axis points -X (toward where outgoing pipe body extends)
+    # rotation_matrix_y(-90) rotates Z from +Z to -X
+    outlet_transform = translation_matrix(0, A, 0) @ rotation_matrix_y(-90)
+    ports["outlet"] = Port("outlet", outlet_transform)
+
+    # ==========================================================================
+    # WELD ATTACHMENT POINTS
+    # ==========================================================================
+    # Butt weld joints are at the weld end faces.
+    # Faces are perpendicular to the arc tangent at each end.
+
+    attachment_points = {}
+
+    # Inlet weld attachment points at (A, 0, 0), face in XZ plane (perpendicular to Y)
+    inlet_attachment_positions = [
+        ("up", 0.0, r_outer, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_outer, 0.0, -1.0),  # -Z
+        ("east", r_outer, 0.0, 1.0, 0.0),  # +X
+        ("west", -r_outer, 0.0, -1.0, 0.0),  # -X
+    ]
+
+    for suffix, x_off, z_off, nx, nz in inlet_attachment_positions:
+        name = f"inlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(A + x_off, 0, z_off),
+            normal=(nx, 0.0, nz),
+            attachment_type="weld",
+            port_name="inlet",
+        )
+
+    # Outlet weld attachment points at (0, A, 0), face in YZ plane (perpendicular to X)
+    outlet_attachment_positions = [
+        ("up", 0.0, r_outer, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_outer, 0.0, -1.0),  # -Z
+        ("north", r_outer, 0.0, 1.0, 0.0),  # +Y
+        ("south", -r_outer, 0.0, -1.0, 0.0),  # -Y
+    ]
+
+    for suffix, y_off, z_off, ny, nz in outlet_attachment_positions:
+        name = f"outlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(0, A + y_off, z_off),
+            normal=(0.0, ny, nz),
+            attachment_type="weld",
+            port_name="outlet",
+        )
+
+    return Fitting(nps=nps, shape=elbow_shape, ports=ports, attachment_points=attachment_points)
+
+
+# =============================================================================
 # BUTT WELD TEE
 # =============================================================================
 
@@ -1449,6 +1555,208 @@ def compute_mate_transform(port_a: Port, port_b: Port, fitting_a_transform: np.n
     fitting_b_world = desired_port_b @ port_b_inv
 
     return fitting_b_world
+
+
+# =============================================================================
+# GASKET
+# =============================================================================
+
+
+def make_gasket(
+    nps: str,
+    gasket_type: str = "flat_ring",
+    thickness_mm: float | None = None,
+    pressure_class: int = 300,
+) -> Fitting:
+    """
+    Create a gasket fitting with ports on both faces.
+
+    The gasket sits between two mating flange faces. It has two ports:
+    - "face_a": Top face at Z=+thickness/2, Z-axis points +Z
+    - "face_b": Bottom face at Z=-thickness/2, Z-axis points -Z
+
+    Coordinate system:
+    - Gasket centered at origin
+    - Lies in XY plane
+    - Thickness extends from Z=-t/2 to Z=+t/2
+
+    When mated between flanges:
+    - Flange 1's face port mates to gasket's face_a
+    - Gasket's face_b mates to Flange 2's face port
+
+    Args:
+        nps: Nominal pipe size (e.g., "2", "4", "6")
+        gasket_type: "flat_ring" (ASME B16.21) or "spiral_wound" (ASME B16.20)
+        thickness_mm: Override thickness in mm (uses standard if None)
+        pressure_class: 150 or 300 (for flat_ring gaskets)
+
+    Returns:
+        Fitting object with shape and ports
+    """
+    if gasket_type == "flat_ring":
+        from .gasket_flat_ring import ASME_B1621_CLASS150_FLAT, ASME_B1621_CLASS300_FLAT, make_flat_ring_gasket
+
+        # Get dimensions for thickness
+        if pressure_class == 150:
+            dims_table = ASME_B1621_CLASS150_FLAT
+        else:
+            dims_table = ASME_B1621_CLASS300_FLAT
+
+        dims = dims_table.get(nps)
+        if dims is None:
+            raise ValueError(f"No flat ring gasket dimensions for NPS {nps} Class {pressure_class}")
+
+        thickness = thickness_mm if thickness_mm is not None else dims.thickness
+        shape = make_flat_ring_gasket(nps, thickness_mm=thickness, pressure_class=pressure_class)
+        description = "FLAT RING GASKET"
+
+    elif gasket_type == "spiral_wound":
+        from .gasket_spiral_wound import ASME_B1620_CLASS300_SPIRAL, make_spiral_wound_gasket
+
+        dims = ASME_B1620_CLASS300_SPIRAL.get(nps)
+        if dims is None:
+            raise ValueError(f"No spiral wound gasket dimensions for NPS {nps}")
+
+        thickness = thickness_mm if thickness_mm is not None else dims.compressed_thickness
+        shape = make_spiral_wound_gasket(nps, thickness_mm=thickness)
+        description = "SPIRAL WOUND GASKET"
+
+    else:
+        raise ValueError(f"Unknown gasket type: {gasket_type}. Use 'flat_ring' or 'spiral_wound'.")
+
+    # Define ports on both faces
+    ports = {}
+
+    # Face A port: at +Z face (top), Z-axis points +Z
+    face_a_transform = translation_matrix(0, 0, thickness / 2)
+    ports["face_a"] = Port("face_a", face_a_transform)
+
+    # Face B port: at -Z face (bottom), Z-axis points -Z
+    # Rotate 180° around X to flip Z-axis
+    face_b_transform = translation_matrix(0, 0, -thickness / 2) @ rotation_matrix_x(180)
+    ports["face_b"] = Port("face_b", face_b_transform)
+
+    # No weld attachment points for gaskets (they are bolted, not welded)
+    attachment_points: dict[str, AttachmentPoint] = {}
+
+    # Store gasket metadata
+    fitting = Fitting(nps=nps, shape=shape, ports=ports, attachment_points=attachment_points)
+
+    return fitting
+
+
+def get_gasket_thickness(
+    nps: str,
+    gasket_type: str = "flat_ring",
+    pressure_class: int = 300,
+) -> float:
+    """
+    Get the standard thickness for a gasket.
+
+    Args:
+        nps: Nominal pipe size
+        gasket_type: "flat_ring" or "spiral_wound"
+        pressure_class: 150 or 300 (for flat_ring)
+
+    Returns:
+        Thickness in mm
+    """
+    if gasket_type == "flat_ring":
+        from .gasket_flat_ring import ASME_B1621_CLASS150_FLAT, ASME_B1621_CLASS300_FLAT
+
+        if pressure_class == 150:
+            dims = ASME_B1621_CLASS150_FLAT.get(nps)
+        else:
+            dims = ASME_B1621_CLASS300_FLAT.get(nps)
+
+        if dims is None:
+            raise ValueError(f"No flat ring gasket dimensions for NPS {nps}")
+        return dims.thickness
+
+    elif gasket_type == "spiral_wound":
+        from .gasket_spiral_wound import ASME_B1620_CLASS300_SPIRAL
+
+        dims = ASME_B1620_CLASS300_SPIRAL.get(nps)
+        if dims is None:
+            raise ValueError(f"No spiral wound gasket dimensions for NPS {nps}")
+        return dims.compressed_thickness
+
+    else:
+        raise ValueError(f"Unknown gasket type: {gasket_type}")
+
+
+def mate_flanges_with_gasket(
+    flange_a: Fitting,
+    flange_a_transform: np.ndarray,
+    flange_b: Fitting,
+    gasket_type: str = "flat_ring",
+    pressure_class: int = 300,
+) -> tuple[np.ndarray, Fitting, np.ndarray]:
+    """
+    Mate two flanges face-to-face with automatic gasket insertion.
+
+    This is a convenience function that:
+    1. Creates a gasket of the appropriate type and size
+    2. Positions the gasket against flange_a's face
+    3. Positions flange_b against the other side of the gasket
+
+    The gasket thickness becomes the effective gap between flange faces.
+
+    Args:
+        flange_a: First flange (already positioned in world)
+        flange_a_transform: 4x4 world transform of flange_a
+        flange_b: Second flange (to be positioned)
+        gasket_type: "flat_ring" or "spiral_wound"
+        pressure_class: 150 or 300 (for flat_ring gaskets)
+
+    Returns:
+        Tuple of:
+        - flange_b_transform: 4x4 world transform for flange_b
+        - gasket: The Gasket Fitting object
+        - gasket_transform: 4x4 world transform for the gasket
+
+    Example:
+        flange_a = make_weld_neck_flange("2")
+        flange_b = make_weld_neck_flange("2")
+
+        flange_a_transform = identity_matrix()
+        flange_b_transform, gasket, gasket_transform = mate_flanges_with_gasket(
+            flange_a, flange_a_transform, flange_b, gasket_type="flat_ring"
+        )
+
+        # Now assemble the shapes
+        parts = [
+            apply_transform_to_shape(flange_a.shape, flange_a_transform),
+            apply_transform_to_shape(gasket.shape, gasket_transform),
+            apply_transform_to_shape(flange_b.shape, flange_b_transform),
+        ]
+        assembly = cq.Compound.makeCompound(parts)
+    """
+    # Use the NPS from flange_a (assume both flanges are same size)
+    nps = flange_a.nps
+
+    # Create the gasket
+    gasket = make_gasket(nps, gasket_type=gasket_type, pressure_class=pressure_class)
+
+    # Step 1: Position gasket's face_a to mate with flange_a's face port
+    # Gasket sits directly against the flange face (no gap)
+    gasket_transform = compute_mate_transform(
+        port_a=flange_a.get_port("face"),
+        port_b=gasket.get_port("face_a"),
+        fitting_a_transform=flange_a_transform,
+        gap=0,
+    )
+
+    # Step 2: Position flange_b's face port to mate with gasket's face_b
+    # Flange_b sits directly against the other side of the gasket
+    flange_b_transform = compute_mate_transform(
+        port_a=gasket.get_port("face_b"),
+        port_b=flange_b.get_port("face"),
+        fitting_a_transform=gasket_transform,
+        gap=0,
+    )
+
+    return (flange_b_transform, gasket, gasket_transform)
 
 
 # =============================================================================

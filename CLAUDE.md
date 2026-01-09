@@ -79,6 +79,34 @@ pypegen is a parametric piping fabrication drawing generator using CadQuery for 
 
 4. **Attachment points vs ports**: Ports are for mating geometry; attachment points are for visual annotation placement (on outer surfaces).
 
+5. **Weld symbol placement**: Weld markers use attachment points (not ports) for proper positioning:
+   - Each fitting has attachment points named `{port_name}_weld_{direction}` (e.g., `inlet_weld_north`)
+   - `_select_weld_attachment_point()` chooses the best point based on pipe direction and weld type
+   - Butt welds prefer the front/visible side (north for E-W pipes in isometric view)
+   - Socket welds prefer the back/bottom to avoid crossing connected geometry
+   - `avoid_direction` parameter prevents placing markers where connected pipes go
+
+### Butt Weld vs Socket Weld Elbow Transforms
+
+The two elbow types have different local geometries requiring different transform calculations:
+
+**Socket Weld Elbow** (`_compute_elbow_transform`):
+- Local geometry: L-shaped body with axis-aligned faces
+- Inlet port Z = +X, Outlet port Z = +Y
+- Center calculation: `center = inlet_pos + A * incoming_direction`
+
+**Butt Weld Elbow** (`_compute_butt_weld_elbow_transform`):
+- Local geometry: Arc centered at origin from (A, 0, 0) to (0, A, 0)
+- Arc tangent at inlet is +Y (flow direction), at outlet is -X
+- Inlet port Z = -Y (opposite of flow), Outlet port Z = -X
+- **Critical**: The rotation matrix must map:
+  - Local +Y (inlet tangent) → world `incoming_direction`
+  - Local -X (outlet tangent) → world `turn_direction`
+- This gives: `col0 = -turn_direction`, `col1 = +incoming_direction`
+- Center calculation: `center = inlet_pos + A * turn_direction`
+
+**Common mistake**: Using `col1 = -incoming_direction` causes the arc to sweep in the wrong direction (toward the incoming pipe instead of away from it).
+
 ### Units and Constants
 
 - Internal units: millimeters (mm)

@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 import cadquery as cq
 import numpy as np
 
+from .fittings.butt_weld_elbow import ASME_B169_ELBOW90
+from .fittings.butt_weld_tee import ASME_B169_TEE
 from .fittings.pipe_fittings import (
     PIPE_SPECS,
     Fitting,
@@ -30,6 +32,8 @@ from .fittings.pipe_fittings import (
     create_port_markers_for_fitting,
     get_position,
     identity_matrix,
+    make_butt_weld_elbow_fitting,
+    make_butt_weld_tee_fitting,
     make_pipe,
     make_socket_weld_elbow,
     make_weld_neck_flange,
@@ -156,8 +160,10 @@ class RouteGeometryBuilder:
 
         # Get dimension tables
         self.elbow_dims = ASME_B1611_ELBOW90_CLASS3000.get(self.nps)
+        self.butt_weld_elbow_dims = ASME_B169_ELBOW90.get(self.nps)
         self.flange_dims = ASME_B165_CLASS300_WN.get(self.nps)
         self.tee_dims = ASME_B1611_TEE_CLASS3000.get(self.nps)
+        self.butt_weld_tee_dims = ASME_B169_TEE.get(self.nps)
         self.cross_dims = ASME_B1611_CROSS_CLASS3000.get(self.nps)
 
         # Component tracking
@@ -227,7 +233,7 @@ class RouteGeometryBuilder:
             for each outlet port.
         """
         if isinstance(node, FlangeNode):
-            return self._build_flange(node, incoming_transform, up_vector)
+            return self._build_flange(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, PipeSegmentNode):
             return self._build_pipe(node, incoming_transform, incoming_direction, up_vector)
         elif isinstance(node, ElbowNode):
@@ -253,27 +259,66 @@ class RouteGeometryBuilder:
         self,
         node: FlangeNode,
         incoming_transform: np.ndarray,
+        incoming_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a flange fitting."""
         _ = up_vector  # Initial up computed based on direction
-        direction = direction_name_to_vector(node.direction)
 
         # Create flange
         fitting = make_weld_neck_flange(node.nps, units="mm")
 
-        # Orient flange so weld port faces in the specified direction
-        # Weld port default direction is -Z, so rotate to align -Z with direction
-        neg_direction = (-direction[0], -direction[1], -direction[2])
-        flange_rotation = rotation_to_align_z_with_direction(neg_direction)
+        # Determine if this is a starting flange (root) or ending flange
+        is_root_flange = (node is self.route.root)
 
-        # Apply to incoming transform
-        flange_transform = incoming_transform @ flange_rotation
+        if is_root_flange:
+            # Starting flange: weld port faces in node.direction (pipe extends that way)
+            direction = direction_name_to_vector(node.direction)
+            # Orient flange so weld port faces in the specified direction
+            # Weld port default direction is -Z, so rotate to align -Z with direction
+            neg_direction = (-direction[0], -direction[1], -direction[2])
+            flange_rotation = rotation_to_align_z_with_direction(neg_direction)
+            # Apply to incoming transform
+            flange_transform = incoming_transform @ flange_rotation
+        else:
+            # Ending flange: weld port should face OPPOSITE to incoming direction
+            # (toward the pipe that's coming toward this flange)
+            direction = incoming_direction  # Flange face points in pipe direction
+            # Weld port should face opposite to incoming direction (toward the pipe)
+            # Rotate to align -Z with opposite of incoming direction
+            # (so weld port Z faces back toward the pipe)
+            neg_weld_dir = (incoming_direction[0], incoming_direction[1], incoming_direction[2])
+            flange_rotation = rotation_to_align_z_with_direction(neg_weld_dir)
+
+            # The weld port is NOT at the flange origin - it's at local (0, 0, -hub_length)
+            # We need to position the flange so the weld port is at the incoming position
+            weld_port = fitting.get_port("weld")
+            weld_local_pos = get_position(weld_port.transform)  # (0, 0, -hub_length)
+
+            # After rotation, the weld port offset from flange center is:
+            rotated_weld_offset = flange_rotation[:3, :3] @ np.array(weld_local_pos)
+
+            # The flange center should be positioned so weld port ends up at incoming position
+            # weld_world = flange_center + rotated_weld_offset
+            # Therefore: flange_center = incoming_position - rotated_weld_offset
+            incoming_position = get_position(incoming_transform)
+            flange_center = (
+                incoming_position[0] - rotated_weld_offset[0],
+                incoming_position[1] - rotated_weld_offset[1],
+                incoming_position[2] - rotated_weld_offset[2],
+            )
+            flange_transform = translation_matrix(*flange_center) @ flange_rotation
 
         # Add geometry
         if fitting.shape is not None:
             shape = apply_transform_to_shape(fitting.shape, flange_transform)
             self.route.parts.append(shape)
+
+        # Get the direction name for tracking (node.direction for root, derived for ending)
+        if is_root_flange:
+            direction_name = node.direction
+        else:
+            direction_name = vector_to_direction_name(incoming_direction)
 
         # Track component
         self._add_component(
@@ -282,21 +327,22 @@ class RouteGeometryBuilder:
             schedule_class=f"Class {node.flange_class}",
             shape=fitting.shape,
             transform=flange_transform,
-            connected_directions=[node.direction],
+            connected_directions=[direction_name],
         )
 
         # Track fitting and add coordinate frame markers if enabled
         self._add_fitting_with_markers(fitting, flange_transform)
 
-        # Track weld at hub
-        self._add_weld(
-            weld_type="BW",
-            description="FLANGE TO PIPE",
-            fitting=fitting,
-            port_name="weld",
-            transform=flange_transform,
-            pipe_direction=node.direction,
-        )
+        # Track weld at hub (only for starting flange - ending flange has no outgoing pipe)
+        if is_root_flange:
+            self._add_weld(
+                weld_type="BW",
+                description="FLANGE TO PIPE",
+                fitting=fitting,
+                port_name="weld",
+                transform=flange_transform,
+                pipe_direction=direction_name,
+            )
 
         # Store transform on node
         node._world_transform = flange_transform
@@ -389,13 +435,19 @@ class RouteGeometryBuilder:
         """Build an elbow fitting."""
         turn_direction = direction_name_to_vector(node.turn_direction)
 
-        # Create elbow
-        fitting = make_socket_weld_elbow(self.nps, units="mm")
-
-        # Compute elbow rotation with up-vector awareness
-        elbow_transform = self._compute_elbow_transform(
-            fitting, incoming_transform, incoming_direction, turn_direction, up_vector
-        )
+        # Create elbow based on weld type
+        if node.weld_type == "bw":
+            fitting = make_butt_weld_elbow_fitting(self.nps, units="mm")
+            # Butt weld elbow has different port orientations, use dedicated transform
+            elbow_transform = self._compute_butt_weld_elbow_transform(
+                fitting, incoming_transform, incoming_direction, turn_direction, up_vector
+            )
+        else:
+            fitting = make_socket_weld_elbow(self.nps, units="mm")
+            # Socket weld elbow uses standard transform computation
+            elbow_transform = self._compute_elbow_transform(
+                fitting, incoming_transform, incoming_direction, turn_direction, up_vector
+            )
 
         # Add geometry
         if fitting.shape is not None:
@@ -418,14 +470,34 @@ class RouteGeometryBuilder:
         # Track fitting and add coordinate frame markers if enabled
         self._add_fitting_with_markers(fitting, elbow_transform)
 
-        # Track welds
+        # Track welds - inlet and outlet
+        weld_type_str = "SW" if node.weld_type == "sw" else "BW"
+        incoming_dir_name = vector_to_direction_name(incoming_direction)
+        turn_dir_name = node.turn_direction
+
+        # Inlet weld: avoid direction is where the elbow goes (turn direction)
         self._add_weld(
-            weld_type="SW" if node.weld_type == "sw" else "BW",
+            weld_type=weld_type_str,
             description="PIPE TO ELBOW",
             fitting=fitting,
             port_name="inlet",
             transform=elbow_transform,
-            pipe_direction=vector_to_direction_name(incoming_direction),
+            pipe_direction=incoming_dir_name,
+            avoid_direction=turn_dir_name,
+        )
+
+        # Outlet weld: avoid direction is where we came from (opposite of incoming)
+        opposite_incoming = vector_to_direction_name(
+            (-incoming_direction[0], -incoming_direction[1], -incoming_direction[2])
+        )
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="ELBOW TO PIPE",
+            fitting=fitting,
+            port_name="outlet",
+            transform=elbow_transform,
+            pipe_direction=turn_dir_name,
+            avoid_direction=opposite_incoming,
         )
 
         # Store transform on node
@@ -460,15 +532,20 @@ class RouteGeometryBuilder:
         """Build a tee fitting."""
         branch_direction = direction_name_to_vector(node.branch_direction)
 
-        # Create tee shape
-        tee_shape = make_socket_weld_tee(self.nps)
-
-        # Create a Fitting object for the tee
-        fitting = self._create_tee_fitting(self.nps, tee_shape)
+        # Create tee based on weld type
+        if node.weld_type == "bw":
+            fitting = make_butt_weld_tee_fitting(self.nps, units="mm")
+            tee_shape = fitting.shape
+        else:
+            # Create socket weld tee shape
+            tee_shape = make_socket_weld_tee(self.nps)
+            # Create a Fitting object for the tee
+            fitting = self._create_tee_fitting(self.nps, tee_shape)
 
         # Compute tee transform with up-vector awareness
         tee_transform = self._compute_tee_transform(
-            fitting, incoming_transform, incoming_direction, branch_direction, up_vector
+            fitting, incoming_transform, incoming_direction, branch_direction, up_vector,
+            weld_type=node.weld_type
         )
 
         # Add geometry
@@ -491,6 +568,47 @@ class RouteGeometryBuilder:
 
         # Track fitting and add coordinate frame markers if enabled
         self._add_fitting_with_markers(fitting, tee_transform)
+
+        # Track welds at all three ports
+        weld_type_str = "SW" if node.weld_type == "sw" else "BW"
+        incoming_dir_name = vector_to_direction_name(incoming_direction)
+        branch_dir_name = node.branch_direction
+
+        # Inlet weld: avoid both run and branch directions
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="PIPE TO TEE",
+            fitting=fitting,
+            port_name="inlet",
+            transform=tee_transform,
+            pipe_direction=incoming_dir_name,
+            avoid_direction=branch_dir_name,  # Avoid branch side
+        )
+
+        # Run weld: avoid incoming and branch directions
+        opposite_incoming = vector_to_direction_name(
+            (-incoming_direction[0], -incoming_direction[1], -incoming_direction[2])
+        )
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="TEE TO PIPE",
+            fitting=fitting,
+            port_name="run",
+            transform=tee_transform,
+            pipe_direction=incoming_dir_name,  # Run continues same direction
+            avoid_direction=opposite_incoming,  # Avoid inlet side
+        )
+
+        # Branch weld: avoid run direction
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="TEE BRANCH TO PIPE",
+            fitting=fitting,
+            port_name="branch",
+            transform=tee_transform,
+            pipe_direction=branch_dir_name,
+            avoid_direction=incoming_dir_name,  # Avoid run direction
+        )
 
         # Store transform on node
         node._world_transform = tee_transform
@@ -899,6 +1017,84 @@ class RouteGeometryBuilder:
 
         return elbow_transform
 
+    def _compute_butt_weld_elbow_transform(
+        self,
+        fitting: Fitting,
+        incoming_transform: np.ndarray,
+        incoming_direction: tuple[float, float, float],
+        turn_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
+    ) -> np.ndarray:
+        """
+        Compute transform for a butt weld elbow.
+
+        Butt weld elbow geometry:
+        - Arc centered at origin, from (A, 0, 0) to (0, A, 0)
+        - At inlet (A, 0, 0): arc tangent is +Y (flow direction)
+        - At outlet (0, A, 0): arc tangent is -X (flow direction)
+
+        Port orientations (Z points toward connecting pipe body):
+        - Inlet port Z = -Y (opposite of flow = toward incoming pipe body)
+        - Outlet port Z = -X (same as flow tangent... actually toward outgoing pipe body)
+
+        For world transform:
+        - Local +Y (inlet tangent/flow) should map to world incoming_direction
+        - Local -X (outlet tangent/flow) should map to world turn_direction
+
+        This gives:
+        - R[:,1] = incoming_direction (local Y → world incoming)
+        - R[:,0] = -turn_direction (local X → world -turn, so -X → +turn)
+        """
+        _ = fitting  # Unused but kept for API consistency
+
+        inc = np.array(incoming_direction)
+        out = np.array(turn_direction)
+        up = np.array(up_vector)
+
+        # Rotation matrix columns:
+        # col0: where local X goes = -turn (so local -X = outlet tangent goes to +turn)
+        # col1: where local Y goes = incoming (inlet tangent direction)
+        # col2: perpendicular to both for right-handed system
+        col0 = -np.array(turn_direction)
+        col1 = np.array(incoming_direction)  # Changed from -incoming to +incoming
+        z_vec = np.cross(col0, col1)
+        z_norm = np.linalg.norm(z_vec)
+
+        if z_norm < 1e-6:
+            z_vec = up
+        else:
+            z_vec = z_vec / z_norm
+
+        rotation = np.eye(4)
+        rotation[:3, 0] = col0
+        rotation[:3, 1] = col1
+        rotation[:3, 2] = z_vec
+
+        # Get butt weld elbow dimensions
+        dims = self.butt_weld_elbow_dims
+        if dims is None:
+            raise ValueError(f"No butt weld elbow dimensions for NPS {self.nps}")
+
+        A = dims.center_to_end_lr  # Center to end (bend radius)
+
+        # Position elbow so inlet is at incoming_transform position
+        # Butt weld elbow: inlet at local (A, 0, 0)
+        # After rotation R, inlet offset from center = A * col0 = A * (-turn)
+        # So: inlet_world = center + A * (-turn)
+        # We want: inlet_world = inlet_pos
+        # Therefore: center = inlet_pos + A * turn
+        inlet_pos = get_position(incoming_transform)
+
+        center_pos = (
+            inlet_pos[0] + A * turn_direction[0],
+            inlet_pos[1] + A * turn_direction[1],
+            inlet_pos[2] + A * turn_direction[2],
+        )
+
+        elbow_transform = translation_matrix(*center_pos) @ rotation
+
+        return elbow_transform
+
     def _compute_tee_transform(
         self,
         fitting: Fitting,
@@ -906,6 +1102,7 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
         branch_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
+        weld_type: str = "sw",
     ) -> np.ndarray:
         """
         Compute transform for a tee with up-vector awareness.
@@ -918,9 +1115,15 @@ class RouteGeometryBuilder:
         # Tee default: inlet from -X, run to +X, branch to +Y
         # The tee body lies in the XY plane
 
-        dims = self.tee_dims
-        if dims is None:
-            raise ValueError(f"No tee dimensions for NPS {self.nps}")
+        # Use correct dimensions based on weld type
+        if weld_type == "bw":
+            dims = self.butt_weld_tee_dims
+            if dims is None:
+                raise ValueError(f"No butt weld tee dimensions for NPS {self.nps}")
+        else:
+            dims = self.tee_dims
+            if dims is None:
+                raise ValueError(f"No tee dimensions for NPS {self.nps}")
 
         C = dims.center_to_end_run
 
@@ -1048,6 +1251,79 @@ class RouteGeometryBuilder:
             )
         )
 
+    def _select_weld_attachment_point(
+        self,
+        fitting: Fitting,
+        port_name: str,
+        pipe_direction: str,
+        weld_type: str = "BW",
+        avoid_direction: str | None = None,
+    ) -> str:
+        """
+        Select the best weld attachment point based on pipe direction and weld type.
+
+        For butt welds (BW): Prefer front side (north for E-W pipes, visible in iso view)
+        For socket welds (SW): Prefer south/back side (to avoid crossing connected fittings)
+
+        Args:
+            fitting: The Fitting object with attachment points
+            port_name: The port to find attachments for (e.g., "weld", "inlet", "outlet")
+            pipe_direction: The direction the pipe runs at this weld
+            weld_type: "BW" for butt weld, "SW" for socket weld
+            avoid_direction: Direction to avoid (where next fitting is)
+
+        Returns:
+            Name of the best attachment point to use
+        """
+        # Get all weld attachment points for this port
+        attachments = fitting.get_attachment_points_for_port(port_name)
+        if not attachments:
+            # Fallback to port position if no attachment points
+            return ""
+
+        # Define preference order based on weld type and pipe direction
+        pipe_dir = pipe_direction.lower()
+
+        if weld_type == "BW":
+            # Butt welds: prefer front side (north for E-W pipes, east for N-S pipes)
+            if pipe_dir in ("east", "west"):
+                preference = ["north", "up", "south", "down"]
+            elif pipe_dir in ("north", "south"):
+                preference = ["east", "up", "west", "down"]
+            else:  # up/down
+                preference = ["north", "east", "south", "west"]
+        else:
+            # Socket welds: attach at back/bottom to avoid crossing connected fittings
+            if pipe_dir in ("east", "west"):
+                preference = ["down", "south", "up", "north"]
+            elif pipe_dir in ("north", "south"):
+                preference = ["down", "west", "up", "east"]
+            else:  # up/down
+                preference = ["west", "down", "east", "up"]
+
+        # If we have an avoid direction, move it to the end of preference
+        if avoid_direction:
+            avoid_dir = avoid_direction.lower()
+            if avoid_dir in preference:
+                preference.remove(avoid_dir)
+                preference.append(avoid_dir)
+
+        # Find the first available attachment point in preference order
+        attachment_names = {ap.name: ap for ap in attachments}
+
+        for direction in preference:
+            # Build possible attachment point names
+            possible_names = [
+                f"{port_name}_weld_{direction}",
+                f"{port_name}_{direction}",
+            ]
+            for name in possible_names:
+                if name in attachment_names:
+                    return name
+
+        # Fallback: return first available attachment
+        return attachments[0].name
+
     def _add_weld(
         self,
         weld_type: str,
@@ -1056,17 +1332,27 @@ class RouteGeometryBuilder:
         port_name: str,
         transform: np.ndarray,
         pipe_direction: str,
+        avoid_direction: str | None = None,
     ) -> None:
-        """Track a weld for drawing annotation."""
+        """Track a weld for drawing annotation using attachment points."""
         if not HAS_BOM or WeldRecord is None:
             return
 
         self._weld_counter += 1
 
-        # Get weld position from fitting port
-        port = fitting.get_port(port_name)
-        port_world = transform @ port.transform
-        weld_pos = get_position(port_world)
+        # Select the best attachment point for this weld
+        attachment_name = self._select_weld_attachment_point(
+            fitting, port_name, pipe_direction, weld_type, avoid_direction
+        )
+
+        # Get weld position from attachment point (preferred) or port (fallback)
+        if attachment_name:
+            weld_pos = fitting.get_attachment_point_world_position(attachment_name, transform)
+        else:
+            # Fallback to port position if no attachment points
+            port = fitting.get_port(port_name)
+            port_world = transform @ port.transform
+            weld_pos = get_position(port_world)
 
         pipe_radius = self.pipe_spec.od_mm / 2.0 if self.pipe_spec else 30.0
 
@@ -1077,6 +1363,7 @@ class RouteGeometryBuilder:
                 description=description,
                 world_position_3d=weld_pos,
                 pipe_direction=pipe_direction,
+                avoid_direction=avoid_direction,
                 pipe_radius_mm=pipe_radius,
             )
         )

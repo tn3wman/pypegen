@@ -10,8 +10,15 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 import cadquery as cq
-import cairosvg
 from cadquery.occ_impl.exporters.svg import getSVG
+
+# Make PDF export optional using svglib + reportlab (pure Python, no Cairo needed)
+try:
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPDF
+    SVGLIB_AVAILABLE = True
+except ImportError:
+    SVGLIB_AVAILABLE = False
 
 from .axis_indicator import create_axis_indicator_svg
 from .bom import (
@@ -44,6 +51,9 @@ from .constants import (
 )
 from .title_block import TitleBlock, TitleBlockInfo
 from .view_area import ViewArea
+
+# Import transform utility for applying world transforms to shapes
+from ..fittings.pipe_fittings import apply_transform_to_shape
 
 
 def load_step_file(filepath: str) -> cq.Shape:
@@ -748,8 +758,16 @@ class PipingDrawing:
                 print(f"  Component {comp.item_number} ({comp.component_type}): No shape available")
                 continue
 
+            # Apply world transform to get shape in world coordinates
+            # The raw comp.shape is at local origin; we need to transform it
+            # to its actual world position before computing SVG bounds
+            if comp.world_transform is not None:
+                transformed_shape = apply_transform_to_shape(comp.shape, comp.world_transform)
+            else:
+                transformed_shape = comp.shape
+
             # Render component through CadQuery to get actual SVG geometry AND points
-            result = self._get_component_actual_svg_bounds_and_points(comp.shape)
+            result = self._get_component_actual_svg_bounds_and_points(transformed_shape)
             if result is None:
                 print(f"  Component {comp.item_number} ({comp.component_type}): Failed to get SVG data")
                 continue
@@ -1218,6 +1236,7 @@ class PipingDrawing:
         from .bom import WELD_MARKER_OFFSET, WELD_MARKER_SIZE, WORLD_DIR_TO_SCREEN_OFFSET, WeldMarker, compute_pipe_perpendicular_screen_direction, render_weld_markers_svg
 
         markers = []
+        debug_markers = []  # Debug visualization of weld positions
         placed_positions = []  # Track placed label positions to avoid overlap
 
         for weld in self.welds:
@@ -1234,6 +1253,18 @@ class PipingDrawing:
 
             weld_x, weld_y = svg_pos
             print(f"    -> SVG=({weld_x:.1f}, {weld_y:.1f})")
+
+            # Add debug marker at weld position (magenta circle with label)
+            if self.show_debug:
+                debug_markers.append(
+                    f'<circle cx="{weld_x:.2f}" cy="{weld_y:.2f}" '
+                    f'r="3" fill="none" stroke="magenta" stroke-width="0.5" opacity="0.9"/>'
+                )
+                debug_markers.append(
+                    f'<text x="{weld_x + 4:.2f}" y="{weld_y - 2:.2f}" '
+                    f'font-family="Arial" font-size="2.5" fill="magenta" font-weight="bold">'
+                    f'{weld.label}</text>'
+                )
 
             # Get screen direction for label placement
             if weld.weld_type == "SW":
@@ -1298,7 +1329,24 @@ class PipingDrawing:
             print(f"    -> weld=({best_weld_pos[0]:.1f}, {best_weld_pos[1]:.1f}), "
                   f"label=({best_label_pos[0]:.1f}, {best_label_pos[1]:.1f})")
 
-        return render_weld_markers_svg(markers)
+            # Add debug line from weld point to label position
+            if self.show_debug:
+                debug_markers.append(
+                    f'<line x1="{best_weld_pos[0]:.2f}" y1="{best_weld_pos[1]:.2f}" '
+                    f'x2="{best_label_pos[0]:.2f}" y2="{best_label_pos[1]:.2f}" '
+                    f'stroke="magenta" stroke-width="0.3" stroke-dasharray="1,1" opacity="0.7"/>'
+                )
+
+        # Include debug markers if enabled
+        result = render_weld_markers_svg(markers)
+        if self.show_debug and debug_markers:
+            debug_svg = '\n'.join([
+                '<!-- DEBUG: Weld position markers (magenta) -->',
+                '<g id="debug-weld-markers">'
+            ] + debug_markers + ['</g>'])
+            result = debug_svg + '\n' + result
+
+        return result
 
     def _create_attachment_point_debug_markers(self) -> str:
         """Create debug markers showing ALL attachment points on all fittings.
@@ -1453,26 +1501,42 @@ class PipingDrawing:
         if not self._svg_content:
             self.generate()
 
-        with open(filepath, 'w') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(self._svg_content)
         print(f"Exported SVG: {filepath}")
 
     def export_pdf(self, filepath: str):
-        """Export the drawing as PDF file."""
+        """Export the drawing as PDF file using svglib + reportlab."""
+        if not SVGLIB_AVAILABLE:
+            raise ImportError(
+                "PDF export requires svglib and reportlab. "
+                "Install with: pip install svglib reportlab"
+            )
+
         if not self._svg_content:
             self.generate()
 
-        # Convert mm to points for PDF
-        width_pt = SHEET_WIDTH_MM / 25.4 * 72
-        height_pt = SHEET_HEIGHT_MM / 25.4 * 72
+        # Write SVG to a temporary file for svglib to read
+        import tempfile
+        import os
 
-        cairosvg.svg2pdf(
-            bytestring=self._svg_content.encode('utf-8'),
-            write_to=filepath,
-            output_width=width_pt,
-            output_height=height_pt,
-        )
-        print(f"Exported PDF: {filepath}")
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.svg',
+                                          encoding='utf-8', delete=False) as tmp:
+            tmp.write(self._svg_content)
+            tmp_path = tmp.name
+
+        try:
+            # Convert SVG to ReportLab drawing
+            drawing = svg2rlg(tmp_path)
+            if drawing is None:
+                raise ValueError("Failed to parse SVG content")
+
+            # Render to PDF
+            renderPDF.drawToFile(drawing, filepath)
+            print(f"Exported PDF: {filepath}")
+        finally:
+            # Clean up temp file
+            os.unlink(tmp_path)
 
 
 # Alias for backward compatibility
