@@ -411,13 +411,22 @@ class PipeRoute:
                 preference = ["down", "south", "up", "north"]
             elif pipe_dir in ("north", "south"):
                 preference = ["down", "west", "up", "east"]
-            else:  # up/down - prefer west, leader will extend east (right on screen)
-                preference = ["west", "down", "east", "up"]
+            else:  # up/down - flow-aware: prefer attachment on "outgoing" side
+                if pipe_dir == "up":
+                    # Pipe flows upward, prefer "up" attachment (away from incoming)
+                    preference = ["up", "west", "down", "east"]
+                else:  # down
+                    # Pipe flows downward, prefer "down" attachment (away from incoming)
+                    preference = ["down", "west", "up", "east"]
 
         # If we have an avoid direction, move it to the end of preference
+        # But don't avoid "up"/"down" for vertical pipes - those are preferred directions
         if avoid_direction:
             avoid_dir = avoid_direction.lower()
-            if avoid_dir in preference:
+            # For vertical pipes, don't penalize the preferred flow direction
+            is_vertical_pipe = pipe_dir in ("up", "down")
+            is_flow_direction = avoid_dir in ("up", "down")
+            if avoid_dir in preference and not (is_vertical_pipe and is_flow_direction):
                 preference.remove(avoid_dir)
                 preference.append(avoid_dir)
 

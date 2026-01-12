@@ -39,8 +39,14 @@ def nested_tee_example():
 
             run2.add_pipe("10 in")
             run2.add_elbow("west", "bw")
+            run2.add_pipe("10 in")
+            run2.add_elbow("north", "bw")
+            run2.add_pipe("10 in")
+            run2.add_elbow("west", "bw")
+            run2.add_pipe("60 in")
 
             branch2.add_pipe("10 in")
+            branch2.add_flange()
 
     # # Level 1 tee
     # with builder.add_tee(branch_direction="north") as tee1:

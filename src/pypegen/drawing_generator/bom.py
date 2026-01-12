@@ -330,6 +330,180 @@ class WeldMarker:
         return f"W{self.weld_number}"
 
 
+@dataclass
+class WeldPlacementContext:
+    """
+    Spatial context for intelligent weld marker placement.
+
+    This class aggregates information about the piping system geometry
+    to enable collision-aware marker placement.
+    """
+    # 2D pipe segments in screen space: list of ((x1,y1), (x2,y2)) tuples
+    pipe_segments_2d: list[tuple[tuple[float, float], tuple[float, float]]]
+
+    # Already placed markers (to avoid overlap)
+    placed_markers: list['WeldMarker'] = field(default_factory=list)
+
+    # Already placed BOM balloons (to avoid overlap)
+    placed_balloons: list['Balloon'] = field(default_factory=list)
+
+
+@dataclass
+class AnnotationPlacementContext:
+    """
+    Unified context for coordinating balloon and weld marker placement.
+
+    This class:
+    1. Tracks all placed annotations (balloons + weld markers)
+    2. Computes effective sizes based on fit_scale
+    3. Provides collision detection across all annotation types
+    """
+    view_area: 'ViewArea'
+    fit_scale: float
+    pipe_segments_2d: list[tuple[tuple[float, float], tuple[float, float]]] = field(
+        default_factory=list
+    )
+
+    # Placed annotations
+    placed_balloons: list['Balloon'] = field(default_factory=list)
+    placed_weld_markers: list['WeldMarker'] = field(default_factory=list)
+
+    # Effective sizes (computed in __post_init__)
+    effective_balloon_radius: float = field(init=False)
+    effective_weld_size: float = field(init=False)
+    effective_balloon_leader: float = field(init=False)
+    effective_weld_offset: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._compute_effective_sizes()
+
+    def _compute_effective_sizes(self) -> None:
+        """Compute annotation sizes that scale with fit_scale."""
+        # Scale factor with bounds: use sqrt for gentler scaling
+        # This means at fit_scale=0.25 (large assembly), size_scale=0.5
+        # At fit_scale=1.0, size_scale=1.0
+        size_scale = max(0.6, min(1.2, self.fit_scale ** 0.5))
+
+        # Minimum sizes for readability
+        min_balloon_radius = 3.0
+        min_weld_size = 2.5
+        min_leader = 6.0
+
+        self.effective_balloon_radius = max(
+            min_balloon_radius, BALLOON_RADIUS * size_scale
+        )
+        self.effective_weld_size = max(
+            min_weld_size, WELD_MARKER_SIZE * size_scale
+        )
+
+        # Leader lengths scale inversely (longer when geometry is smaller)
+        # This spreads annotations further apart on scaled-down drawings
+        leader_scale = 1.0 / max(0.5, size_scale)
+        self.effective_balloon_leader = max(min_leader, 12.0 * leader_scale)
+        self.effective_weld_offset = max(
+            min_leader + 6, WELD_MARKER_OFFSET * leader_scale
+        )
+
+    def has_collision(
+        self, center: tuple[float, float], radius: float
+    ) -> bool:
+        """Check if position collides with any placed annotation."""
+        margin = 2.0
+
+        # Check balloon collisions
+        for balloon in self.placed_balloons:
+            min_dist = radius + balloon.radius + margin
+            dist = math.sqrt(
+                (center[0] - balloon.center[0]) ** 2
+                + (center[1] - balloon.center[1]) ** 2
+            )
+            if dist < min_dist:
+                return True
+
+        # Check weld marker collisions
+        for marker in self.placed_weld_markers:
+            min_dist = radius + self.effective_weld_size + margin
+            dist = math.sqrt(
+                (center[0] - marker.label_position[0]) ** 2
+                + (center[1] - marker.label_position[1]) ** 2
+            )
+            if dist < min_dist:
+                return True
+
+        return False
+
+
+def _cross_product_2d(
+    o: tuple[float, float],
+    a: tuple[float, float],
+    b: tuple[float, float]
+) -> float:
+    """
+    Compute 2D cross product of vectors OA and OB.
+
+    Returns positive if OAB makes a counter-clockwise turn,
+    negative if clockwise, zero if collinear.
+    """
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _line_segments_intersect(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    p4: tuple[float, float]
+) -> bool:
+    """
+    Check if line segment p1-p2 intersects line segment p3-p4.
+
+    Uses the cross product method to detect proper intersection
+    (not touching at endpoints).
+    """
+    d1 = _cross_product_2d(p3, p4, p1)
+    d2 = _cross_product_2d(p3, p4, p2)
+    d3 = _cross_product_2d(p1, p2, p3)
+    d4 = _cross_product_2d(p1, p2, p4)
+
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+       ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
+        return True
+    return False
+
+
+def _leader_crosses_pipe(
+    start_2d: tuple[float, float],
+    end_2d: tuple[float, float],
+    pipe_segments: list[tuple[tuple[float, float], tuple[float, float]]],
+    exclude_threshold: float = 5.0
+) -> bool:
+    """
+    Check if a leader line from start_2d to end_2d crosses any pipe segment.
+
+    Args:
+        start_2d: Starting point of leader line (at weld)
+        end_2d: End point of leader line (at label)
+        pipe_segments: List of 2D pipe segments to check against
+        exclude_threshold: Distance threshold to exclude nearby segments
+                          (the weld's own pipe should be excluded)
+
+    Returns:
+        True if the leader would cross a pipe segment
+    """
+    for seg_start, seg_end in pipe_segments:
+        # Skip segments that are very close to the start point
+        # (the weld's own pipe segment)
+        dist_to_start = min(
+            math.sqrt((start_2d[0] - seg_start[0])**2 + (start_2d[1] - seg_start[1])**2),
+            math.sqrt((start_2d[0] - seg_end[0])**2 + (start_2d[1] - seg_end[1])**2)
+        )
+        if dist_to_start < exclude_threshold:
+            continue
+
+        if _line_segments_intersect(start_2d, end_2d, seg_start, seg_end):
+            return True
+    return False
+
+
 # Weld marker styling constants
 WELD_MARKER_SIZE = 3.5         # mm - size of weld marker oval
 WELD_MARKER_OFFSET = 18.0      # mm - offset from weld point to label (increased for clarity)
@@ -688,9 +862,9 @@ def compute_pipe_perpendicular_screen_direction(pipe_direction: str) -> tuple[fl
     # Use consistent isometric directions for balloon/weld placement
     # based on pipe direction and isometric visibility
     if pipe_dir in ("up", "down"):
-        # Vertical pipes: prefer WEST direction (left-up on screen)
+        # Vertical pipes: prefer SOUTH direction (left-down on screen)
         # This keeps balloons away from typical east-facing branches
-        return (-cos30, -sin30)  # West: (-0.866, -0.5)
+        return (-cos30, sin30)  # South: (-0.866, 0.5)
     elif pipe_dir in ("east", "west"):
         # E-W pipes: use isometric "north" direction (right and up)
         # North is the visible front side in isometric view
@@ -758,8 +932,9 @@ def compute_tee_balloon_direction(
     """
     Compute the best balloon direction for a tee.
 
-    The balloon should point away from the branch to avoid overlapping
-    with branch pipes.
+    Similar to elbows, the balloon should be perpendicular to the plane
+    of the tee (run + branch directions) and on the visible side in
+    isometric view.
 
     Args:
         run_direction: Direction of the main run (e.g., "up")
@@ -771,30 +946,35 @@ def compute_tee_balloon_direction(
     run = run_direction.lower()
     branch = branch_direction.lower()
 
-    # For vertical runs with horizontal branches, go opposite to branch
-    if run in ("up", "down"):
-        if branch == "east":
-            return "west"
-        elif branch == "west":
-            return "east"
-        elif branch == "north":
-            return "south"
-        elif branch == "south":
-            return "north"
+    # Tee lies in a plane defined by run and branch directions
+    # Balloon should be perpendicular to this plane, on the visible side
 
-    # For horizontal runs with vertical branches
-    if run in ("east", "west"):
-        if branch == "up":
-            return "down"
-        elif branch == "down":
-            return "up"
-        elif branch == "north":
-            return "south"
-        elif branch == "south":
-            return "north"
+    # Vertical run with E-W branch: tee in vertical-EW plane, balloon goes south
+    if run in ("up", "down") and branch in ("east", "west"):
+        return "south"
 
-    # Default: prefer north (visible in isometric)
-    return "north"
+    # Vertical run with N-S branch: tee in vertical-NS plane, balloon goes east
+    if run in ("up", "down") and branch in ("north", "south"):
+        return "east"
+
+    # E-W run with vertical branch: tee in EW-vertical plane, balloon goes south
+    if run in ("east", "west") and branch in ("up", "down"):
+        return "south"
+
+    # E-W run with N-S branch: tee in horizontal plane, balloon goes up
+    if run in ("east", "west") and branch in ("north", "south"):
+        return "up"
+
+    # N-S run with vertical branch: tee in NS-vertical plane, balloon goes east
+    if run in ("north", "south") and branch in ("up", "down"):
+        return "east"
+
+    # N-S run with E-W branch: tee in horizontal plane, balloon goes up
+    if run in ("north", "south") and branch in ("east", "west"):
+        return "up"
+
+    # Default: prefer south (visible in isometric)
+    return "south"
 
 
 def compute_flange_balloon_direction(connected_direction: str) -> str:
@@ -1192,11 +1372,18 @@ class TopologyBalloonPlacer:
         self,
         view_area: ViewArea,
         balloon_radius: float = BALLOON_RADIUS,
-        leader_length: float = 15.0  # Fixed leader length in mm
+        leader_length: float = 15.0,  # Fixed leader length in mm
+        context: AnnotationPlacementContext | None = None
     ):
         self.view_area = view_area
-        self.balloon_radius = balloon_radius
-        self.leader_length = leader_length
+        self.context = context
+        # Use context sizes if available, otherwise use provided defaults
+        if context:
+            self.balloon_radius = context.effective_balloon_radius
+            self.leader_length = context.effective_balloon_leader
+        else:
+            self.balloon_radius = balloon_radius
+            self.leader_length = leader_length
         self.placed_balloons: list[Balloon] = []
 
     def place_balloon_for_component(
@@ -1628,13 +1815,18 @@ class TopologyBalloonPlacer:
             y + margin > self.view_area.bottom):
             return False
 
-        # Check collision with existing balloons
+        # Check collision with existing balloons (from this placer)
         min_dist = self.balloon_radius * 2 + 3
         for other in self.placed_balloons:
             dist = math.sqrt(
                 (x - other.center[0])**2 + (y - other.center[1])**2
             )
             if dist < min_dist:
+                return False
+
+        # Check collision with weld markers (from context, if available)
+        if self.context:
+            if self.context.has_collision(balloon_center, r):
                 return False
 
         return True
@@ -2029,7 +2221,10 @@ def create_weld_markers(
     welds: list['WeldRecord'],
     coord_mapper: 'CoordinateMapper',
     view_area: Optional['ViewArea'] = None,
-    existing_markers: list[WeldMarker] | None = None
+    existing_markers: list[WeldMarker] | None = None,
+    pipe_segments_2d: list[tuple[tuple[float, float], tuple[float, float]]] | None = None,
+    placed_balloons: list['Balloon'] | None = None,
+    context: AnnotationPlacementContext | None = None
 ) -> list[WeldMarker]:
     """
     Create WeldMarker objects from WeldRecords with smart placement.
@@ -2044,12 +2239,23 @@ def create_weld_markers(
         coord_mapper: CoordinateMapper for 3D to 2D projection
         view_area: Optional view area for bounds checking
         existing_markers: Previously placed markers to avoid
+        pipe_segments_2d: 2D pipe segments for collision detection
+        placed_balloons: Already placed BOM balloons to avoid
+        context: Optional AnnotationPlacementContext for scale-aware sizing
 
     Returns:
         List of WeldMarker objects ready for rendering
     """
     markers = []
     placed_positions = []  # Track placed label positions to avoid overlap
+
+    # Use context sizes if available, otherwise use defaults
+    if context:
+        weld_offset = context.effective_weld_offset
+        weld_size = context.effective_weld_size
+    else:
+        weld_offset = WELD_MARKER_OFFSET
+        weld_size = WELD_MARKER_SIZE
 
     if existing_markers:
         placed_positions = [m.label_position for m in existing_markers]
@@ -2125,12 +2331,12 @@ def create_weld_markers(
             weld_y = cy + dy * edge_offset
 
             # Label is further out along the same direction
-            label_x = weld_x + dx * WELD_MARKER_OFFSET
-            label_y = weld_y + dy * WELD_MARKER_OFFSET
+            label_x = weld_x + dx * weld_offset
+            label_y = weld_y + dy * weld_offset
 
             # Check bounds (if view_area provided)
             if view_area:
-                margin = WELD_MARKER_SIZE * 1.5
+                margin = weld_size * 1.5
                 if (label_x - margin < view_area.x or
                     label_x + margin > view_area.x + view_area.width or
                     label_y - margin < view_area.y or
@@ -2139,12 +2345,31 @@ def create_weld_markers(
 
             # Check overlap with existing markers
             overlap = False
-            min_dist = WELD_MARKER_SIZE * 3  # Minimum distance between labels
+            min_dist = weld_size * 3  # Minimum distance between labels
             for px, py in placed_positions:
                 dist = math.sqrt((label_x - px)**2 + (label_y - py)**2)
                 if dist < min_dist:
                     overlap = True
                     break
+
+            # Check overlap with BOM balloons
+            if not overlap and placed_balloons:
+                balloon_margin = weld_size * 2
+                for balloon in placed_balloons:
+                    bx, by = balloon.center
+                    dist = math.sqrt((label_x - bx)**2 + (label_y - by)**2)
+                    if dist < balloon.radius + balloon_margin:
+                        overlap = True
+                        break
+
+            # Check if leader line crosses any pipe geometry
+            if not overlap and pipe_segments_2d:
+                if _leader_crosses_pipe(
+                    (weld_x, weld_y),
+                    (label_x, label_y),
+                    pipe_segments_2d
+                ):
+                    overlap = True
 
             if not overlap:
                 best_weld_pos = (weld_x, weld_y)
@@ -2159,7 +2384,7 @@ def create_weld_markers(
             weld_x = cx + dx * edge_offset
             weld_y = cy + dy * edge_offset
             best_weld_pos = (weld_x, weld_y)
-            best_label_pos = (weld_x + dx * WELD_MARKER_OFFSET, weld_y + dy * WELD_MARKER_OFFSET)
+            best_label_pos = (weld_x + dx * weld_offset, weld_y + dy * weld_offset)
 
         placed_positions.append(best_label_pos)
         # best_weld_pos is always set: either in the loop above or in the fallback
@@ -2172,3 +2397,98 @@ def create_weld_markers(
         ))
 
     return markers
+
+
+def optimize_annotation_positions(
+    context: AnnotationPlacementContext,
+    max_iterations: int = 10
+) -> None:
+    """
+    Apply force-directed optimization to resolve remaining annotation overlaps.
+
+    Uses a simple repulsion algorithm where overlapping annotations push each other
+    apart. Modifies balloon centers and weld marker label positions in place.
+
+    The algorithm:
+    1. Collect all annotation positions (balloons and weld markers)
+    2. For each pair of overlapping annotations, apply repulsion force
+    3. Move annotations apart proportionally to their overlap
+    4. Repeat until converged or max iterations reached
+
+    Args:
+        context: AnnotationPlacementContext with placed_balloons and placed_weld_markers
+        max_iterations: Maximum number of optimization iterations (default 10)
+    """
+    for _iteration in range(max_iterations):
+        total_movement = 0.0
+
+        # Collect all annotation positions
+        # Each entry: {'pos': [x, y], 'radius': r, 'type': str, 'obj': object}
+        annotations: list[dict] = []
+        for b in context.placed_balloons:
+            annotations.append({
+                'pos': [b.center[0], b.center[1]],  # Mutable list for updating
+                'radius': b.radius,
+                'type': 'balloon',
+                'obj': b
+            })
+        for m in context.placed_weld_markers:
+            annotations.append({
+                'pos': [m.label_position[0], m.label_position[1]],
+                'radius': context.effective_weld_size,
+                'type': 'weld',
+                'obj': m
+            })
+
+        if len(annotations) < 2:
+            return  # Nothing to optimize
+
+        # Check all pairs and apply repulsion
+        for i, ann1 in enumerate(annotations):
+            for ann2 in annotations[i + 1:]:
+                min_dist = ann1['radius'] + ann2['radius'] + 3.0
+                dx = ann1['pos'][0] - ann2['pos'][0]
+                dy = ann1['pos'][1] - ann2['pos'][1]
+                actual_dist = math.sqrt(dx * dx + dy * dy)
+
+                if actual_dist < min_dist and actual_dist > 0.1:
+                    # Compute repulsion - push apart
+                    overlap = min_dist - actual_dist
+                    nudge = overlap * 0.25  # Damping factor
+                    nx, ny = dx / actual_dist, dy / actual_dist
+
+                    # Move both annotations apart (each moves half the distance)
+                    ann1['pos'][0] += nx * nudge
+                    ann1['pos'][1] += ny * nudge
+                    ann2['pos'][0] -= nx * nudge
+                    ann2['pos'][1] -= ny * nudge
+                    total_movement += nudge * 2
+
+        # Apply updated positions back to objects
+        for ann in annotations:
+            if ann['type'] == 'balloon':
+                b = ann['obj']
+                new_center = (ann['pos'][0], ann['pos'][1])
+                # Recompute leader_end to point from new center toward leader_start
+                dx = new_center[0] - b.leader_start[0]
+                dy = new_center[1] - b.leader_start[1]
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist > 0:
+                    # leader_end is on the balloon circle, toward the component
+                    leader_end = (
+                        new_center[0] - (dx / dist) * b.radius,
+                        new_center[1] - (dy / dist) * b.radius
+                    )
+                else:
+                    leader_end = new_center
+                # Update balloon (dataclass is not frozen)
+                b.center = new_center
+                b.leader_end = leader_end
+            else:
+                # Weld marker - update label position
+                m = ann['obj']
+                m.label_position = (ann['pos'][0], ann['pos'][1])
+
+        # Stop if converged (very little movement)
+        if total_movement < 0.5:
+            break

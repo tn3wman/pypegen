@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 import cadquery as cq
+import numpy as np
 from cadquery.occ_impl.exporters.svg import getSVG
 
 # Make PDF export optional using svglib + reportlab (pure Python, no Cairo needed)
@@ -22,14 +23,19 @@ except ImportError:
 
 from .axis_indicator import create_axis_indicator_svg
 from .bom import (
+    AnnotationPlacementContext,
     BOMTable,
     ComponentRecord,
     CoordinateMapper,
     TopologyBalloonPlacer,
     WeldRecord,
+    _leader_crosses_pipe,
     aggregate_components_to_bom,
+    create_weld_markers,
     get_bounding_box_corners,
+    optimize_annotation_positions,
     render_all_balloons_svg,
+    render_weld_markers_svg,
 )
 from .constants import (
     BOM_WIDTH,
@@ -71,6 +77,73 @@ def strip_svg_namespaces(svg_content: str) -> str:
     cleaned = re.sub(r'</ns\d+:', '</', cleaned)
     cleaned = re.sub(r'\s*xmlns:ns\d+="[^"]*"', '', cleaned)
     return cleaned
+
+
+def _world_normal_to_direction_label(normal: tuple[float, float, float]) -> str:
+    """Map a world normal vector to the closest cardinal direction label.
+
+    Args:
+        normal: (nx, ny, nz) world normal direction
+
+    Returns:
+        Single character label: N, S, E, W, U, or D
+    """
+    nx, ny, nz = normal
+
+    # Find the axis with the largest magnitude
+    abs_vals = [abs(nx), abs(ny), abs(nz)]
+    max_idx = abs_vals.index(max(abs_vals))
+
+    if max_idx == 0:  # X-axis dominant
+        return "E" if nx > 0 else "W"
+    elif max_idx == 1:  # Y-axis dominant
+        return "N" if ny > 0 else "S"
+    else:  # Z-axis dominant
+        return "U" if nz > 0 else "D"
+
+
+def _screen_direction_to_compass_label(dx: float, dy: float) -> str:
+    """Map a 2D screen direction to the closest compass direction label.
+
+    In the isometric projection used for piping drawings:
+    - East (+X world): screen direction (0.866, 0.5) - lower right at 30° below horizontal
+    - North (+Y world): screen direction (0.866, -0.5) - upper right at 30° above horizontal
+    - Up (+Z world): screen direction (0.0, -1.0) - straight up
+
+    Args:
+        dx: Screen X direction (positive = right)
+        dy: Screen Y direction (positive = down, SVG convention)
+
+    Returns:
+        Single character label: N, S, E, W, U, or D
+    """
+    # Normalize the direction
+    length = math.sqrt(dx * dx + dy * dy)
+    if length < 1e-6:
+        return "?"
+    dx, dy = dx / length, dy / length
+
+    # Compass directions in screen coordinates (from WORLD_DIR_TO_SCREEN_OFFSET)
+    # Note: SVG Y increases downward, so "up" has negative dy
+    compass_dirs = {
+        "E": (0.866, 0.5),    # +X world: right and down (30° below horizontal)
+        "W": (-0.866, -0.5),  # -X world: left and up
+        "N": (0.866, -0.5),   # +Y world: right and up (30° above horizontal)
+        "S": (-0.866, 0.5),   # -Y world: left and down
+        "U": (0.0, -1.0),     # +Z world: straight up
+        "D": (0.0, 1.0),      # -Z world: straight down
+    }
+
+    # Find the compass direction with the highest dot product
+    best_label = "?"
+    best_dot = -2.0
+    for label, (cx, cy) in compass_dirs.items():
+        dot = dx * cx + dy * cy
+        if dot > best_dot:
+            best_dot = dot
+            best_label = label
+
+    return best_label
 
 
 def is_point_in_bounds(
@@ -1235,6 +1308,20 @@ class PipingDrawing:
 
         from .bom import WELD_MARKER_OFFSET, WELD_MARKER_SIZE, WORLD_DIR_TO_SCREEN_OFFSET, WeldMarker, compute_weld_label_screen_direction, render_weld_markers_svg
 
+        # Extract 2D pipe segments for collision detection
+        pipe_segments_2d: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for comp in self.components:
+            if comp.component_type == "pipe" and comp.svg_bounds_2d:
+                min_x, min_y, max_x, max_y = comp.svg_bounds_2d
+                # For pipes, use the bounding box diagonal as the segment
+                # This approximates the pipe's centerline in screen space
+                pipe_segments_2d.append(((min_x, min_y), (max_x, max_y)))
+                # Also add the other diagonal for better coverage
+                pipe_segments_2d.append(((min_x, max_y), (max_x, min_y)))
+
+        if pipe_segments_2d:
+            print(f"  Extracted {len(pipe_segments_2d)} pipe segments for collision detection")
+
         markers = []
         debug_markers = []  # Debug visualization of weld positions
         placed_positions = []  # Track placed label positions to avoid overlap
@@ -1306,6 +1393,24 @@ class PipingDrawing:
                 else:
                     print("    WARNING: Label position out of bounds")
 
+            # Check if leader line crosses any pipe geometry
+            leader_crosses = False
+            if pipe_segments_2d:
+                leader_crosses = _leader_crosses_pipe(
+                    best_weld_pos, best_label_pos, pipe_segments_2d
+                )
+                if leader_crosses and not never_flip:
+                    # Try opposite direction
+                    alt_label_x = weld_x - dx * WELD_MARKER_OFFSET
+                    alt_label_y = weld_y - dy * WELD_MARKER_OFFSET
+                    alt_crosses = _leader_crosses_pipe(
+                        best_weld_pos, (alt_label_x, alt_label_y), pipe_segments_2d
+                    )
+                    if not alt_crosses:
+                        best_label_pos = (alt_label_x, alt_label_y)
+                        leader_crosses = False
+                        print(f"    -> Flipped to avoid crossing pipe")
+
             # Check overlap with existing markers and try alternative position if needed
             for px, py in placed_positions:
                 if math.sqrt((best_label_pos[0] - px)**2 + (best_label_pos[1] - py)**2) < WELD_MARKER_SIZE * 3:
@@ -1354,6 +1459,104 @@ class PipingDrawing:
 
         return result
 
+    def _create_annotations(self) -> str:
+        """Create all annotations (balloons and weld markers) with unified placement.
+
+        This method coordinates placement between BOM balloons and weld markers to:
+        1. Use scale-aware annotation sizing based on fit_scale
+        2. Place balloons first, then place weld markers avoiding balloons
+        3. Apply force-directed optimization to resolve remaining overlaps
+
+        Returns:
+            Combined SVG string for all annotations
+        """
+        if not self.show_balloons and not self.show_welds:
+            return ""
+
+        svg_parts = []
+
+        # Extract 2D pipe segments for collision detection
+        pipe_segments_2d: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for comp in self.components:
+            if comp.component_type == "pipe" and comp.svg_bounds_2d:
+                min_x, min_y, max_x, max_y = comp.svg_bounds_2d
+                pipe_segments_2d.append(((min_x, min_y), (max_x, max_y)))
+                pipe_segments_2d.append(((min_x, max_y), (max_x, min_y)))
+
+        # Create unified placement context with scale-aware sizing
+        context = AnnotationPlacementContext(
+            view_area=self._model_view_area,
+            fit_scale=self._fit_scale,
+            pipe_segments_2d=pipe_segments_2d
+        )
+
+        print(f"\n--- Unified Annotation Placement (fit_scale={self._fit_scale:.3f}) ---")
+        print(f"  Effective balloon radius: {context.effective_balloon_radius:.2f}mm")
+        print(f"  Effective balloon leader: {context.effective_balloon_leader:.2f}mm")
+        print(f"  Effective weld size: {context.effective_weld_size:.2f}mm")
+        print(f"  Effective weld offset: {context.effective_weld_offset:.2f}mm")
+
+        # Phase 1: Place BOM balloons
+        if self.show_balloons and self.components:
+            placer = TopologyBalloonPlacer(
+                view_area=self._model_view_area,
+                context=context
+            )
+
+            print("\n--- Placing Balloons (with context) ---")
+            for comp in self.components:
+                if comp.svg_position_2d is None:
+                    print(f"  Balloon {comp.item_number} ({comp.component_type}): No SVG position stored")
+                    continue
+
+                screen_center = comp.svg_position_2d
+                screen_bounds = comp.svg_bounds_2d or (
+                    screen_center[0] - 10, screen_center[1] - 10,
+                    screen_center[0] + 10, screen_center[1] + 10
+                )
+
+                balloon = placer.place_balloon_for_component(
+                    comp=comp,
+                    screen_center=screen_center,
+                    screen_bounds=screen_bounds
+                )
+
+                if balloon:
+                    context.placed_balloons.append(balloon)
+                    print(f"  Balloon {comp.item_number} ({comp.component_type}): "
+                          f"placed at ({balloon.center[0]:.1f}, {balloon.center[1]:.1f})")
+                else:
+                    print(f"  Balloon {comp.item_number} ({comp.component_type}): FAILED to place")
+
+        # Phase 2: Place weld markers (avoiding balloons)
+        if self.show_welds and self.welds:
+            print("\n--- Placing Weld Markers (with context, avoiding balloons) ---")
+            markers = create_weld_markers(
+                welds=self.welds,
+                coord_mapper=self._coord_mapper,
+                view_area=self._model_view_area,
+                pipe_segments_2d=pipe_segments_2d,
+                placed_balloons=context.placed_balloons,
+                context=context
+            )
+            context.placed_weld_markers = markers
+
+            for m in markers:
+                print(f"  Weld {m.weld_number}: label at ({m.label_position[0]:.1f}, {m.label_position[1]:.1f})")
+
+        # Phase 3: Force-directed optimization to resolve overlaps
+        if context.placed_balloons or context.placed_weld_markers:
+            print("\n--- Running overlap optimization ---")
+            optimize_annotation_positions(context)
+
+        # Render SVG
+        if context.placed_balloons:
+            svg_parts.append(render_all_balloons_svg(context.placed_balloons))
+        if context.placed_weld_markers:
+            svg_parts.append(render_weld_markers_svg(context.placed_weld_markers))
+
+        return '\n'.join(svg_parts)
+
     def _create_attachment_point_debug_markers(self) -> str:
         """Create debug markers showing ALL attachment points on all fittings.
 
@@ -1380,6 +1583,23 @@ class PipingDrawing:
             # Get all weld attachment points from this fitting
             weld_attachments = fitting.get_weld_attachment_points()
 
+            # Group attachment points by port and compute port centers
+            port_centers_3d = {}
+            port_attachments = {}
+            for ap in weld_attachments:
+                port_name = ap.port_name or "weld"
+                if port_name not in port_attachments:
+                    port_attachments[port_name] = []
+                port_attachments[port_name].append(ap)
+
+            # Compute 3D center for each port's attachment points
+            for port_name, aps in port_attachments.items():
+                positions = [fitting.get_attachment_point_world_position(ap.name, world_transform) for ap in aps]
+                cx = sum(p[0] for p in positions) / len(positions)
+                cy = sum(p[1] for p in positions) / len(positions)
+                cz = sum(p[2] for p in positions) / len(positions)
+                port_centers_3d[port_name] = (cx, cy, cz)
+
             for ap in weld_attachments:
                 # Get world position of this attachment point
                 world_pos = fitting.get_attachment_point_world_position(ap.name, world_transform)
@@ -1403,11 +1623,17 @@ class PipingDrawing:
                     f'opacity="0.9"/>'
                 )
 
-                # Add a small label with the direction suffix (e.g., "north", "south")
-                # Extract the direction from the name (e.g., "inlet_weld_south" -> "S")
-                parts = ap.name.split('_')
-                direction = parts[-1] if len(parts) > 1 else ap.name
-                short_label = direction[0].upper()  # First letter: N, S, E, W, U, D
+                # Get the port center in screen coordinates
+                port_center_3d = port_centers_3d.get(port_name, world_pos)
+                port_center_svg = self._get_svg_position_for_3d_point(*port_center_3d)
+                if port_center_svg is None:
+                    port_center_svg = (sx, sy)
+
+                # Compute screen direction from port center to attachment point
+                # This matches what the user sees relative to the compass
+                screen_dx = sx - port_center_svg[0]
+                screen_dy = sy - port_center_svg[1]
+                short_label = _screen_direction_to_compass_label(screen_dx, screen_dy)
 
                 markers.append(
                     f'<text x="{sx + 3:.1f}" y="{sy - 1:.1f}" '

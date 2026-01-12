@@ -1418,15 +1418,13 @@ class RouteGeometryBuilder:
         pipe_direction: str,
         weld_type: str = "BW",
         avoid_direction: str | None = None,
+        world_transform: np.ndarray | None = None,
     ) -> str:
         """
-        Select the best weld attachment point based on pipe direction and isometric visibility.
+        Select the best weld attachment point based on world-space direction.
 
-        Weld markers should be placed on the VISIBLE side in isometric view:
-        - Isometric view is from direction (1, 1, 1), looking toward origin
-        - For E-W pipes: prefer down or south attachment
-        - For vertical pipes (up/down): prefer down attachment
-        - For branch ports (going east): prefer east attachment
+        For vertical pipes, selects the attachment point that actually faces
+        the desired world direction (up/down), not just by local name.
 
         Args:
             fitting: The Fitting object with attachment points
@@ -1434,6 +1432,7 @@ class RouteGeometryBuilder:
             pipe_direction: The direction the pipe runs at this weld
             weld_type: "BW" for butt weld, "SW" for socket weld
             avoid_direction: Direction to avoid (where next fitting is)
+            world_transform: 4x4 transformation matrix to world coordinates
 
         Returns:
             Name of the best attachment point to use
@@ -1444,29 +1443,108 @@ class RouteGeometryBuilder:
             # Fallback to port position if no attachment points
             return ""
 
-        # Define preference order based on pipe direction and isometric visibility
         pipe_dir = pipe_direction.lower()
 
-        # For weld markers, prefer the visible/downward side in isometric view
+        # For vertical pipes with world_transform, select by actual world direction
+        if pipe_dir in ("up", "down") and world_transform is not None:
+            # For vertical pipes, attachment points are perpendicular to the pipe axis.
+            # We want to place markers on the OPPOSITE side from connected fittings
+            # (avoid_direction) to prevent markers from crossing geometry.
+            #
+            # Direction mapping for world coordinates:
+            direction_to_world = {
+                "east": np.array([1.0, 0.0, 0.0]),
+                "west": np.array([-1.0, 0.0, 0.0]),
+                "north": np.array([0.0, 1.0, 0.0]),
+                "south": np.array([0.0, -1.0, 0.0]),
+                "up": np.array([0.0, 0.0, 1.0]),
+                "down": np.array([0.0, 0.0, -1.0]),
+            }
+
+            # Define pipe axis direction first (needed for cross product)
+            if pipe_dir == "up":
+                pipe_axis_dir = np.array([0.0, 0.0, 1.0])
+            else:
+                pipe_axis_dir = np.array([0.0, 0.0, -1.0])
+
+            # Determine preferred world direction for attachment:
+            # For vertical pipes with horizontal branches, we want a direction that is:
+            # 1. Perpendicular to the pipe axis (so marker is on the side)
+            # 2. Perpendicular to the avoid direction (so marker doesn't cross branch pipes)
+            # This is achieved by cross product: -(pipe_axis × avoid_dir)
+            if avoid_direction and avoid_direction.lower() in direction_to_world:
+                avoid_world_dir = direction_to_world[avoid_direction.lower()]
+                # Cross product gives perpendicular direction
+                # Negate to get the "away" side (right-hand rule)
+                preferred_world_dir = -np.cross(pipe_axis_dir, avoid_world_dir)
+                # Normalize in case of numerical issues
+                norm = np.linalg.norm(preferred_world_dir)
+                if norm > 0.1:
+                    preferred_world_dir = preferred_world_dir / norm
+                else:
+                    # Fallback if cross product is near zero (avoid_dir along pipe axis)
+                    preferred_world_dir = np.array([0.0, -1.0, 0.0])
+            else:
+                # Default: prefer south for visibility in isometric view
+                preferred_world_dir = np.array([0.0, -1.0, 0.0])
+
+            best_ap = None
+            best_score = -2.0
+
+            rotation_matrix = world_transform[:3, :3]
+
+            for ap in attachments:
+                # Transform local normal to world space
+                local_normal = np.array(ap.normal)
+                world_normal = rotation_matrix @ local_normal
+                norm = np.linalg.norm(world_normal)
+                if norm > 0:
+                    world_normal = world_normal / norm
+
+                # Score based on:
+                # 1. Alignment with pipe axis (for pipe-end attachments) - highest priority
+                # 2. Alignment with preferred direction (opposite of avoid) - for perpendicular
+                pipe_axis_dot = np.dot(world_normal, pipe_axis_dir)
+                preferred_dot = np.dot(world_normal, preferred_world_dir)
+
+                if abs(pipe_axis_dot) > 0.7:
+                    # Attachment faces along pipe axis - prioritize
+                    score = pipe_axis_dot
+                else:
+                    # Perpendicular attachment - use preferred direction
+                    score = preferred_dot * 0.9
+
+                if score > best_score:
+                    best_score = score
+                    best_ap = ap
+
+            if best_ap is not None and best_score > 0.3:
+                return best_ap.name
+
+        # Fall back to name-based selection for horizontal pipes or if world transform unavailable
+        # Define preference order based on pipe direction and isometric visibility
         if pipe_dir in ("east", "west"):
             # E-W pipes: prefer down, then south (both visible in iso)
             preference = ["down", "south", "up", "north"]
         elif pipe_dir in ("north", "south"):
             # N-S pipes: prefer down, then west (visible in iso)
             preference = ["down", "west", "up", "east"]
-        else:  # up/down (vertical pipes)
-            # Vertical pipes: prefer down attachment (visible in iso view)
-            preference = ["down", "south", "west", "north", "east", "up"]
+        else:  # up/down (vertical pipes) - fallback if world transform didn't work
+            if pipe_dir == "up":
+                preference = ["up", "south", "west", "north", "east", "down"]
+            else:
+                preference = ["down", "south", "west", "north", "east", "up"]
 
         # Special case for branch ports (like tee branch going east)
-        # Use east attachment point for branches going east
         if port_name == "branch" and pipe_dir == "east":
             preference = ["east", "down", "south", "west", "north", "up"]
 
         # If we have an avoid direction, move it to the end of preference
         if avoid_direction:
             avoid_dir = avoid_direction.lower()
-            if avoid_dir in preference:
+            is_vertical_pipe = pipe_dir in ("up", "down")
+            is_flow_direction = avoid_dir in ("up", "down")
+            if avoid_dir in preference and not (is_vertical_pipe and is_flow_direction):
                 preference.remove(avoid_dir)
                 preference.append(avoid_dir)
 
@@ -1474,7 +1552,6 @@ class RouteGeometryBuilder:
         attachment_names = {ap.name: ap for ap in attachments}
 
         for direction in preference:
-            # Build possible attachment point names
             possible_names = [
                 f"{port_name}_weld_{direction}",
                 f"{port_name}_{direction}",
@@ -1504,7 +1581,7 @@ class RouteGeometryBuilder:
 
         # Select the best attachment point for this weld
         attachment_name = self._select_weld_attachment_point(
-            fitting, port_name, pipe_direction, weld_type, avoid_direction
+            fitting, port_name, pipe_direction, weld_type, avoid_direction, transform
         )
 
         # Extract attachment direction from attachment name (e.g., "inlet_weld_down" -> "down")
