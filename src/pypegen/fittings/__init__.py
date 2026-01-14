@@ -25,6 +25,7 @@ from .pipe_fittings import (
     translation_matrix,
     # Fitting factories
     make_butt_weld_elbow_fitting,
+    make_butt_weld_reducer_fitting,
     make_butt_weld_tee_fitting,
     make_pipe,
     make_socket_weld_elbow,
@@ -40,6 +41,18 @@ from .pipe_fittings import (
     mate_flanges_with_gasket,
 )
 
+# Butt weld reducer dimension data and utilities
+from .butt_weld_reducer import (
+    ASME_B169_REDUCER,
+    ButtWeldReducerDims,
+    compare_nps,
+    get_available_reducers_from,
+    get_butt_weld_reducer_dims,
+    make_butt_weld_reducer,
+    nps_to_float,
+    validate_reducer,
+)
+
 # Gasket dimension data
 from .gasket_flat_ring import (
     ASME_B1621_CLASS150_FLAT,
@@ -53,8 +66,8 @@ from .gasket_spiral_wound import (
     make_spiral_wound_gasket,
 )
 
-# Flange dimension data
-from .weld_neck_flange import ASME_B165_CLASS300_WN, WeldNeckFlangeDims
+# Flange dimension data and types
+from .weld_neck_flange import ASME_B165_CLASS300_WN, BoltHoleOrientation, WeldNeckFlangeDims
 
 __all__ = [
     # Base classes
@@ -76,6 +89,7 @@ __all__ = [
     "translation_matrix",
     # Fitting factories
     "make_butt_weld_elbow_fitting",
+    "make_butt_weld_reducer_fitting",
     "make_butt_weld_tee_fitting",
     "make_pipe",
     "make_socket_weld_elbow",
@@ -97,7 +111,17 @@ __all__ = [
     "SpiralWoundGasketDims",
     "make_flat_ring_gasket",
     "make_spiral_wound_gasket",
-    # Flange dimension data
+    # Flange dimension data and types
     "ASME_B165_CLASS300_WN",
+    "BoltHoleOrientation",
     "WeldNeckFlangeDims",
+    # Butt weld reducer dimension data and utilities
+    "ASME_B169_REDUCER",
+    "ButtWeldReducerDims",
+    "compare_nps",
+    "get_available_reducers_from",
+    "get_butt_weld_reducer_dims",
+    "make_butt_weld_reducer",
+    "nps_to_float",
+    "validate_reducer",
 ]

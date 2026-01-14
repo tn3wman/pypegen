@@ -26,6 +26,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .fittings.pipe_fittings import Fitting
+    from .fittings.weld_neck_flange import BoltHoleOrientation
 
 
 # =============================================================================
@@ -136,11 +137,20 @@ class FlangeNode(RouteNode):
 
     Outlets:
         - "weld": Connection point for pipe extending from flange hub
+
+    Attributes:
+        nps: Nominal pipe size
+        flange_class: ASME pressure class (e.g., 150, 300)
+        direction: Direction the pipe will go from this flange
+        bolt_hole_orientation: Bolt hole orientation relative to the pipe direction.
+            - "single_hole": One bolt hole lies on the reference plane
+            - "two_hole": Two bolt holes symmetric about the reference plane
     """
 
     nps: str = "2"
     flange_class: int = 300
     direction: str = "east"  # Direction the pipe will go from this flange
+    bolt_hole_orientation: BoltHoleOrientation = "single_hole"
 
     def get_outlet_ports(self) -> list[str]:
         return ["weld"]
@@ -188,18 +198,25 @@ class TeeNode(RouteNode):
     """
     Tee fitting - 3 ports total (1 inlet, 2 outlets).
 
-    The inlet receives pipe from the current direction. The run continues
-    straight through, and the branch exits at 90 degrees.
+    Standard mode (enter_via_branch=False):
+        The inlet receives pipe from the current direction. The run continues
+        straight through, and the branch exits at 90 degrees.
+        Outlets: "run", "branch"
 
-    Outlets:
-        - "run": Continues straight through the tee
-        - "branch": 90-degree outlet in branch_direction
+    Branch entry mode (enter_via_branch=True):
+        The branch receives pipe from the current direction. Both ends of
+        the run become outlets.
+        Outlets: "run_a", "run_b"
     """
 
     weld_type: WeldType = "sw"
-    branch_direction: str = "north"  # World direction of the branch port
+    branch_direction: str = "north"  # World direction of the branch port (standard mode)
+    enter_via_branch: bool = False  # If True, incoming connects to branch
+    run_direction: str | None = None  # World direction of run (branch entry mode)
 
     def get_outlet_ports(self) -> list[str]:
+        if self.enter_via_branch:
+            return ["run_a", "run_b"]
         return ["run", "branch"]
 
 

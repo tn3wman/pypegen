@@ -41,6 +41,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, overload
 
+from .fittings.weld_neck_flange import BoltHoleOrientation
 from .route_nodes import (
     CrossNode,
     ElbowNode,
@@ -215,29 +216,54 @@ class BranchBuilder:
 
     def add_tee(
         self,
-        branch_direction: str,
+        branch_direction: str | None = None,
         weld_type: WeldType = "sw",
         name: str | None = None,
+        *,
+        enter_via_branch: bool = False,
+        run_direction: str | None = None,
     ) -> TeeContext:
         """
         Add a tee fitting for nested branching.
 
+        Standard mode (enter_via_branch=False):
+            Incoming pipe connects to tee inlet, continues through the run,
+            with a side branch at 90 degrees.
+
+        Branch entry mode (enter_via_branch=True):
+            Incoming pipe connects to the branch port. Both ends of the run
+            become outlets (run_a and run_b).
+
         Args:
-            branch_direction: World direction of the branch outlet
+            branch_direction: World direction of the branch outlet (standard mode)
             weld_type: "sw" for socket weld, "bw" for butt weld
             name: Optional name for this tee
+            enter_via_branch: If True, connect incoming pipe to branch port
+            run_direction: World direction of the run (branch entry mode only)
 
         Returns:
-            TeeContext for defining the run and branch paths
+            TeeContext for defining the outlet paths
         """
         if self._terminated:
             raise RuntimeError("Cannot add to a terminated branch")
 
-        node = TeeNode(
-            weld_type=weld_type,
-            branch_direction=branch_direction,
-            name=name,
-        )
+        if enter_via_branch:
+            if run_direction is None:
+                raise ValueError("run_direction is required when enter_via_branch=True")
+            node = TeeNode(
+                weld_type=weld_type,
+                enter_via_branch=True,
+                run_direction=run_direction,
+                name=name,
+            )
+        else:
+            if branch_direction is None:
+                raise ValueError("branch_direction is required when enter_via_branch=False")
+            node = TeeNode(
+                weld_type=weld_type,
+                branch_direction=branch_direction,
+                name=name,
+            )
         self._current_node.add_child(self._current_port, node)
         self._terminated = True  # Branch continues via TeeContext
         return TeeContext(self._parent, node)
@@ -347,6 +373,7 @@ class BranchBuilder:
         self,
         direction: str = "east",
         flange_class: int | None = None,
+        bolt_hole_orientation: BoltHoleOrientation = "single_hole",
         name: str | None = None,
     ) -> None:
         """
@@ -355,6 +382,9 @@ class BranchBuilder:
         Args:
             direction: Orientation direction (for the flange face)
             flange_class: Pressure class (defaults to route's flange_class)
+            bolt_hole_orientation: Bolt hole orientation relative to the pipe direction.
+                - "single_hole": One bolt hole lies on the reference plane
+                - "two_hole": Two bolt holes symmetric about the reference plane
             name: Optional name
         """
         if self._terminated:
@@ -368,6 +398,7 @@ class BranchBuilder:
             nps=self._parent._nps,
             flange_class=flange_class,
             direction=direction,
+            bolt_hole_orientation=bolt_hole_orientation,
             name=name,
         )
         self._current_node.add_child(self._current_port, node)
@@ -383,23 +414,32 @@ class TeeContext:
     """
     Context manager for defining tee branches.
 
-    Usage:
+    Standard mode usage:
         with builder.add_tee("north") as tee:
             tee.run().add_pipe("5 ft").add_cap()
             tee.branch().add_pipe("3 ft").add_cap()
+
+    Branch entry mode usage:
+        with builder.add_tee(enter_via_branch=True, run_direction="east") as tee:
+            tee.run_a().add_pipe("5 ft").add_cap()  # Goes east
+            tee.run_b().add_pipe("5 ft").add_cap()  # Goes west
     """
 
     def __init__(self, builder: RouteBuilder, tee_node: TeeNode):
         self._builder = builder
         self._tee_node = tee_node
         self._defined_branches: set[str] = set()
+        self._enter_via_branch = tee_node.enter_via_branch
 
     def __enter__(self) -> TeeContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         # Warn about undefined branches (they'll be open ends)
-        required = {"run", "branch"}
+        if self._enter_via_branch:
+            required = {"run_a", "run_b"}
+        else:
+            required = {"run", "branch"}
         missing = required - self._defined_branches
         if missing and exc_type is None:  # Only warn if no exception
             warnings.warn(
@@ -413,10 +453,13 @@ class TeeContext:
     def run(self) -> BranchBuilder:
         """
         Define the run-through branch (continues straight through the tee).
+        Only available in standard mode (enter_via_branch=False).
 
         Returns:
             BranchBuilder for defining this branch's path
         """
+        if self._enter_via_branch:
+            raise RuntimeError("Use run_a() and run_b() when enter_via_branch=True")
         if "run" in self._defined_branches:
             raise RuntimeError("Tee run branch already defined")
         self._defined_branches.add("run")
@@ -425,14 +468,47 @@ class TeeContext:
     def branch(self) -> BranchBuilder:
         """
         Define the side branch (90 degrees from the run).
+        Only available in standard mode (enter_via_branch=False).
 
         Returns:
             BranchBuilder for defining this branch's path
         """
+        if self._enter_via_branch:
+            raise RuntimeError("Use run_a() and run_b() when enter_via_branch=True")
         if "branch" in self._defined_branches:
             raise RuntimeError("Tee side branch already defined")
         self._defined_branches.add("branch")
         return BranchBuilder(self._builder, self._tee_node, "branch")
+
+    def run_a(self) -> BranchBuilder:
+        """
+        Define the first run outlet (in the run_direction).
+        Only available in branch entry mode (enter_via_branch=True).
+
+        Returns:
+            BranchBuilder for defining this branch's path
+        """
+        if not self._enter_via_branch:
+            raise RuntimeError("Use run() and branch() when enter_via_branch=False")
+        if "run_a" in self._defined_branches:
+            raise RuntimeError("Tee run_a branch already defined")
+        self._defined_branches.add("run_a")
+        return BranchBuilder(self._builder, self._tee_node, "run_a")
+
+    def run_b(self) -> BranchBuilder:
+        """
+        Define the second run outlet (opposite of run_direction).
+        Only available in branch entry mode (enter_via_branch=True).
+
+        Returns:
+            BranchBuilder for defining this branch's path
+        """
+        if not self._enter_via_branch:
+            raise RuntimeError("Use run() and branch() when enter_via_branch=False")
+        if "run_b" in self._defined_branches:
+            raise RuntimeError("Tee run_b branch already defined")
+        self._defined_branches.add("run_b")
+        return BranchBuilder(self._builder, self._tee_node, "run_b")
 
 
 class CrossContext:
@@ -580,7 +656,8 @@ class RouteBuilder:
             material: Material description
             show_coordinate_frames: If True, add debug coordinate frame markers at ports
         """
-        self._nps = nps
+        self._initial_nps = nps  # Store original for route building
+        self._nps = nps  # Current NPS (changes after reducers)
         self._schedule = schedule
         self._flange_class = flange_class
         self._material = material
@@ -604,6 +681,7 @@ class RouteBuilder:
         Returns:
             Self for method chaining
         """
+        self._initial_nps = nps
         self._nps = nps
         return self
 
@@ -670,6 +748,7 @@ class RouteBuilder:
         self,
         direction: str = "east",
         flange_class: int | None = None,
+        bolt_hole_orientation: BoltHoleOrientation = "single_hole",
         name: str | None = None,
     ) -> RouteBuilder:
         """
@@ -680,6 +759,9 @@ class RouteBuilder:
         Args:
             direction: Direction pipe extends from flange (e.g., "east", "up")
             flange_class: Override default flange class
+            bolt_hole_orientation: Bolt hole orientation relative to the pipe direction.
+                - "single_hole": One bolt hole lies on the reference plane
+                - "two_hole": Two bolt holes symmetric about the reference plane
             name: Optional name for this flange
 
         Returns:
@@ -695,6 +777,7 @@ class RouteBuilder:
             nps=self._nps,
             flange_class=flange_class,
             direction=direction,
+            bolt_hole_orientation=bolt_hole_orientation,
             name=name,
         )
         self._current_node = self._root
@@ -948,6 +1031,7 @@ class RouteBuilder:
         self,
         direction: str = "east",
         flange_class: int | None = None,
+        bolt_hole_orientation: BoltHoleOrientation = "single_hole",
         name: str | None = None,
     ) -> RouteBuilder:
         """
@@ -958,6 +1042,9 @@ class RouteBuilder:
         Args:
             direction: Orientation direction for the flange face
             flange_class: Override default flange class
+            bolt_hole_orientation: Bolt hole orientation relative to the pipe direction.
+                - "single_hole": One bolt hole lies on the reference plane
+                - "two_hole": Two bolt holes symmetric about the reference plane
             name: Optional name
 
         Returns:
@@ -973,6 +1060,7 @@ class RouteBuilder:
             nps=self._nps,
             flange_class=flange_class,
             direction=direction,
+            bolt_hole_orientation=bolt_hole_orientation,
             name=name,
         )
         self._current_node.add_child(self._current_port, node)
@@ -1032,9 +1120,9 @@ class RouteBuilder:
         if self._root is None:
             raise ValueError("No route defined. Call start_with_flange() first.")
 
-        # Create the route container
+        # Create the route container (use initial NPS, not current after reducers)
         route = BranchingPipeRoute(
-            nps=self._nps,
+            nps=self._initial_nps,
             schedule=self._schedule,
             flange_class=self._flange_class,
             material=self._material,

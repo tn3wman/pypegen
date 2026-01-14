@@ -14,14 +14,15 @@ from pypegen.route_builder import RouteBuilder
 def nested_tee_example():
     """Route with nested tees (3+ levels deep)."""
     builder = RouteBuilder(
-        nps="2",
+        nps="1-1/2",
         schedule="40",
         flange_class=300,
         material="316 Stainless Steel",
     )
 
-    builder.start_with_flange("west")
-    builder.add_pipe("10 in")
+    builder.start_with_flange("west", bolt_hole_orientation="two_hole")
+    builder.add_pipe("16 in")
+    builder.add_reducer("2")
     builder.add_elbow("up", "bw")
     builder.add_pipe("10 in")
 
@@ -30,23 +31,29 @@ def nested_tee_example():
         branch = tee1.branch()
 
         run.add_pipe("10 in")
-        branch.add_pipe("10 in")
-        branch.add_flange()
+        branch.add_reducer("1-1/2")
+        branch.add_pipe("16.562992126 in")
+        branch.add_flange(bolt_hole_orientation="two_hole")
 
-        with run.add_tee("east", "bw") as tee2:
-            run2 = tee2.run()
-            branch2 = tee2.branch()
+        with run.add_tee(weld_type="bw", enter_via_branch=True, run_direction="east") as tee2:
+            run_a = tee2.run_a()  # Goes east
+            run_b = tee2.run_b()  # Goes west
 
-            run2.add_pipe("10 in")
-            run2.add_elbow("west", "bw")
-            run2.add_pipe("10 in")
-            run2.add_elbow("north", "bw")
-            run2.add_pipe("10 in")
-            run2.add_elbow("west", "bw")
-            run2.add_pipe("60 in")
+            # East side
+            run_a.add_reducer("1-1/2")
+            run_a.add_pipe("16.562992126 in")
+            run_a.add_flange(bolt_hole_orientation="two_hole")
 
-            branch2.add_pipe("10 in")
-            branch2.add_flange()
+            # West side
+            run_b.add_pipe("25.5 in")
+            run_b.add_elbow("north", "sw")
+            pl = 23.373500313 - 0.429498867
+            run_b.add_pipe(f"{pl} in")
+            run_b.add_elbow("up", "bw")
+            run_b.add_pipe("17.242999700 in")
+            run_b.add_elbow("west", "bw")
+            run_b.add_pipe("87.379389802 in")
+            # run_b.add_flange()
 
     # # Level 1 tee
     # with builder.add_tee(branch_direction="north") as tee1:
@@ -71,9 +78,11 @@ def main():
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
+    step_output = Path("U:\\ENGINEERING\\_DRAWINGS\\WR\\W800-899\\W803 - Niron\\06_Mechanical Integrity\\MFC Enclosure")
+
     print("Building nested tee example...")
     route = nested_tee_example()
-    route.export(str(output_dir / "nested_tee.step"))
+    route.export(str(step_output / "hydrogen_in.step"))
 
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
@@ -90,28 +99,28 @@ def main():
     # Create fabrication drawing
     drawing = PipingDrawing(
         shape=combined_shape,
-        title='2" NESTED TEE EXAMPLE',
-        drawing_number="SPOOL-NESTED-TEE-001",
-        revision="0",
-        description='2" NPS BRANCHING PIPING WITH NESTED TEES',
+        title='H2 PIPE TO MFC',
+        drawing_number="5979",
+        revision="A",
+        description='H2 PIPE TO MFC',
         material="316 Stainless Steel",
-        project_number="PYPEGEN-001",
-        drawn_by="CAD",
+        project_number="W803",
+        drawn_by="Tyler Newman",
         show_hidden=True,
         components=route.components,
         welds=route.welds,
         fittings=route.fittings,
         show_bom=True,
-        show_balloons=True,
+        show_balloons=False,
         show_welds=True,
-        show_debug=True,
+        show_debug=False,
     )
 
     drawing.generate()
 
     # Export SVG and PDF
-    svg_path = output_dir / "nested_tee.svg"
-    pdf_path = output_dir / "nested_tee.pdf"
+    svg_path = output_dir / "5979.svg"
+    pdf_path = output_dir / "5979.pdf"
 
     drawing.export_svg(str(svg_path))
     drawing.export_pdf(str(pdf_path))

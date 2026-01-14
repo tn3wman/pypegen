@@ -10,8 +10,22 @@ References:
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import cadquery as cq
+
+# =============================================================================
+# BOLT HOLE ORIENTATION TYPE
+# =============================================================================
+
+BoltHoleOrientation = Literal["single_hole", "two_hole"]
+"""
+Bolt hole orientation relative to a reference plane (the XZ plane in local coordinates).
+
+- "single_hole": One bolt hole lies exactly on the reference plane (at angle 0°)
+- "two_hole": Two bolt holes are symmetric about the reference plane
+             (first hole at angle = 360° / num_bolts / 2)
+"""
 
 # =============================================================================
 # ASME B16.5 CLASS 300 WELD NECK FLANGE DIMENSIONS
@@ -58,7 +72,7 @@ ASME_B165_CLASS300_WN: dict[str, WeldNeckFlangeDims] = {
         hub_od_at_base=2.50, hub_od_at_weld=1.66, bore=1.38, num_bolts=4, bolt_hole_dia=0.75
     ),
     "1-1/2": WeldNeckFlangeDims(
-        nps="1-1/2", flange_od=6.12, flange_thickness=0.81, hub_length=2.69,
+        nps="1-1/2", flange_od=6.12, flange_thickness=0.75, hub_length=2.63,
         raised_face_od=2.88, raised_face_height=0.0625, bolt_circle=4.50,
         hub_od_at_base=2.75, hub_od_at_weld=1.90, bore=1.61, num_bolts=4, bolt_hole_dia=0.875
     ),
@@ -144,7 +158,11 @@ ASME_B165_CLASS300_WN: dict[str, WeldNeckFlangeDims] = {
 # FLANGE GEOMETRY
 # =============================================================================
 
-def make_weld_neck_flange_class300(nps: str, units: str = "inch") -> cq.Shape:
+def make_weld_neck_flange_class300(
+    nps: str,
+    units: str = "inch",
+    bolt_hole_orientation: BoltHoleOrientation = "single_hole",
+) -> cq.Shape:
     """
     Create an ASME B16.5 Class 300 raised face weld neck flange.
 
@@ -156,6 +174,10 @@ def make_weld_neck_flange_class300(nps: str, units: str = "inch") -> cq.Shape:
     Args:
         nps: Nominal pipe size (e.g., "2", "4", "6")
         units: "inch" or "mm" - output units
+        bolt_hole_orientation: Bolt hole orientation relative to the XZ reference plane.
+            - "single_hole": One bolt hole on the reference plane (at angle 0°)
+            - "two_hole": Two bolt holes symmetric about the reference plane
+            Default is "two_hole" which is the most common orientation.
 
     Returns:
         CadQuery Shape of the flange
@@ -232,12 +254,23 @@ def make_weld_neck_flange_class300(nps: str, units: str = "inch") -> cq.Shape:
     # Revolve to create solid
     flange = profile.revolve(360, (0, 0), (0, 1))
 
+    # Calculate starting angle for bolt holes based on orientation
+    # Angular spacing between bolt holes
+    angular_spacing = 360.0 / num_bolts
+    if bolt_hole_orientation == "single_hole":
+        # One bolt hole lies on the reference plane (XZ plane, at angle 0°)
+        start_angle = 0.0
+    else:
+        # "two_hole": Two bolt holes symmetric about the reference plane
+        # First hole is at half the angular spacing from the X-axis
+        start_angle = angular_spacing / 2.0
+
     # Add bolt holes
     flange = (
         flange
         .faces(">Z")
         .workplane()
-        .polarArray(r_bolt_circle, 0, 360, num_bolts)
+        .polarArray(r_bolt_circle, start_angle, 360, num_bolts)
         .circle(r_bolt_hole)
         .cutThruAll()
     )

@@ -48,8 +48,9 @@ from dataclasses import dataclass, field
 import cadquery as cq
 import numpy as np
 
-# Import butt weld tee
+# Import butt weld fittings
 from .butt_weld_elbow import ASME_B169_ELBOW90, make_butt_weld_elbow_90
+from .butt_weld_reducer import ASME_B169_REDUCER, make_butt_weld_reducer
 from .butt_weld_tee import ASME_B169_TEE, make_butt_weld_tee
 from .socket_weld_elbow import (
     ASME_B1611_ELBOW45_CLASS3000,
@@ -73,7 +74,11 @@ from .threaded_elbow import (
 from .threaded_tee import ASME_B1611_THREADED_TEE_CLASS3000, make_threaded_tee
 
 # Import dimension data and shape creation function
-from .weld_neck_flange import ASME_B165_CLASS300_WN, make_weld_neck_flange_class300
+from .weld_neck_flange import (
+    ASME_B165_CLASS300_WN,
+    BoltHoleOrientation,
+    make_weld_neck_flange_class300,
+)
 
 # =============================================================================
 # TRANSFORMATION MATRIX UTILITIES
@@ -659,7 +664,11 @@ class Fitting:
 # =============================================================================
 
 
-def make_weld_neck_flange(nps: str, units: str = "mm") -> Fitting:
+def make_weld_neck_flange(
+    nps: str,
+    units: str = "mm",
+    bolt_hole_orientation: BoltHoleOrientation = "single_hole",
+) -> Fitting:
     """
     Create a weld neck flange with defined ports.
 
@@ -672,6 +681,14 @@ def make_weld_neck_flange(nps: str, units: str = "mm") -> Fitting:
     Ports (using standard convention - Z points OUTWARD toward connecting fitting):
     - "face": At top of raised face (Z=rf_height), Z points +Z (toward mating flange)
     - "weld": At weld end (Z=-hub_length), Z points -Z (toward connecting pipe)
+
+    Args:
+        nps: Nominal pipe size (e.g., "2", "4", "6")
+        units: "inch" or "mm" - output units
+        bolt_hole_orientation: Bolt hole orientation relative to the XZ reference plane.
+            - "single_hole": One bolt hole on the reference plane (at angle 0°)
+            - "two_hole": Two bolt holes symmetric about the reference plane
+            Default is "two_hole" which is the most common orientation.
 
     When mating:
     - Face port connects to another flange's face port (Z's oppose)
@@ -690,7 +707,7 @@ def make_weld_neck_flange(nps: str, units: str = "mm") -> Fitting:
     r_hub_weld = hub_weld_od / 2
 
     # Create the flange shape using the shared function
-    flange_shape = make_weld_neck_flange_class300(nps, units)
+    flange_shape = make_weld_neck_flange_class300(nps, units, bolt_hole_orientation)
 
     # Define ports
     ports = {}
@@ -1166,6 +1183,160 @@ def make_butt_weld_tee_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa:
         attachment_points[name] = AttachmentPoint(name=name, position=(x_off, M_branch, z_off), normal=(nx, 0.0, nz), attachment_type="weld", port_name="branch")
 
     return Fitting(nps=nps, shape=tee_shape, ports=ports, attachment_points=attachment_points)
+
+
+# =============================================================================
+# BUTT WELD REDUCER
+# =============================================================================
+
+
+def make_butt_weld_reducer_fitting(
+    large_nps: str,
+    small_nps: str,
+    units: str = "mm",  # noqa: ARG001
+    reversed: bool = False,
+) -> Fitting:
+    """
+    Create a butt weld concentric reducer with defined ports.
+
+    Coordinate system:
+    - Reducer centerline is along the X-axis
+    - Large end at X=0
+    - Small end at X=H (overall length)
+
+    Port configuration depends on `reversed` parameter:
+
+    Normal mode (reversed=False, for contraction - pipe getting smaller):
+    - "inlet": At large end (X=0), Z-axis points -X
+    - "outlet": At small end (X=H), Z-axis points +X
+
+    Reversed mode (reversed=True, for expansion - pipe getting larger):
+    - "inlet": At small end (X=H), Z-axis points +X
+    - "outlet": At large end (X=0), Z-axis points -X
+
+    This is the same physical fitting, just with ports swapped for expansion use.
+    Port Z-axes always point OUTWARD (direction pipe goes when connected).
+
+    Args:
+        large_nps: Nominal pipe size of large end (e.g., "4", "6")
+        small_nps: Nominal pipe size of small end (e.g., "2", "4")
+        units: Units for dimensions (currently only "mm" supported)
+        reversed: If True, swap inlet/outlet for expansion (pipe getting larger)
+
+    Returns:
+        Fitting object with shape, ports, and attachment points
+
+    Raises:
+        ValueError: If size combination is not available
+    """
+    dims = ASME_B169_REDUCER.get((large_nps, small_nps))
+    if dims is None:
+        raise ValueError(f"No butt weld reducer dimensions for {large_nps} x {small_nps}")
+
+    # Dimensions (in mm)
+    H = dims.length_h  # Overall length
+    r_large_outer = dims.large_od / 2.0  # Large end outer radius
+    r_small_outer = dims.small_od / 2.0  # Small end outer radius
+
+    # Get reducer shape
+    reducer_shape = make_butt_weld_reducer(large_nps, small_nps)
+
+    # Define ports using standard convention:
+    # - Port origin: at the weld end (where pipe connects)
+    # - Port Z-axis: points OUTWARD toward where the connecting pipe's body extends
+    # - Port X-axis: defines rotational orientation (typically "up" = +Z world)
+    #
+    # Reducer geometry:
+    # - Large end at X=0, small end at X=H
+    # - Both weld faces are perpendicular to X-axis
+
+    ports = {}
+    attachment_points = {}
+
+    if not reversed:
+        # Normal mode (contraction): inlet at large end, outlet at small end
+        # Inlet port: at large end (X=0)
+        # Z-axis points -X (outward, toward where incoming large pipe body extends)
+        inlet_transform = translation_matrix(0, 0, 0) @ rotation_matrix_y(-90)
+        ports["inlet"] = Port("inlet", inlet_transform)
+
+        # Outlet port: at small end (X=H)
+        # Z-axis points +X (outward, toward where outgoing small pipe body extends)
+        outlet_transform = translation_matrix(H, 0, 0) @ rotation_matrix_y(90)
+        ports["outlet"] = Port("outlet", outlet_transform)
+
+        # Inlet attachment points at large end (X=0)
+        inlet_radius = r_large_outer
+        inlet_x = 0
+        # Outlet attachment points at small end (X=H)
+        outlet_radius = r_small_outer
+        outlet_x = H
+    else:
+        # Reversed mode (expansion): inlet at small end, outlet at large end
+        # Inlet port: at small end (X=H)
+        # Z-axis points +X (outward, toward where incoming small pipe body extends)
+        inlet_transform = translation_matrix(H, 0, 0) @ rotation_matrix_y(90)
+        ports["inlet"] = Port("inlet", inlet_transform)
+
+        # Outlet port: at large end (X=0)
+        # Z-axis points -X (outward, toward where outgoing large pipe body extends)
+        outlet_transform = translation_matrix(0, 0, 0) @ rotation_matrix_y(-90)
+        ports["outlet"] = Port("outlet", outlet_transform)
+
+        # Inlet attachment points at small end (X=H)
+        inlet_radius = r_small_outer
+        inlet_x = H
+        # Outlet attachment points at large end (X=0)
+        outlet_radius = r_large_outer
+        outlet_x = 0
+
+    # ==========================================================================
+    # WELD ATTACHMENT POINTS
+    # ==========================================================================
+    # Butt weld attachment points are at the weld seam location on outer surface.
+    # Each port has 4 attachment points around the OD circle in the YZ plane.
+
+    # Inlet weld attachment points
+    inlet_attachment_positions = [
+        # (name suffix, Y offset, Z offset, normal_y, normal_z)
+        ("up", 0.0, inlet_radius, 0.0, 1.0),  # +Z
+        ("down", 0.0, -inlet_radius, 0.0, -1.0),  # -Z
+        ("north", inlet_radius, 0.0, 1.0, 0.0),  # +Y
+        ("south", -inlet_radius, 0.0, -1.0, 0.0),  # -Y
+    ]
+
+    for suffix, y_off, z_off, ny, nz in inlet_attachment_positions:
+        name = f"inlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(inlet_x, y_off, z_off),
+            normal=(0.0, ny, nz),
+            attachment_type="weld",
+            port_name="inlet",
+        )
+
+    # Outlet weld attachment points
+    outlet_attachment_positions = [
+        # (name suffix, Y offset, Z offset, normal_y, normal_z)
+        ("up", 0.0, outlet_radius, 0.0, 1.0),  # +Z
+        ("down", 0.0, -outlet_radius, 0.0, -1.0),  # -Z
+        ("north", outlet_radius, 0.0, 1.0, 0.0),  # +Y
+        ("south", -outlet_radius, 0.0, -1.0, 0.0),  # -Y
+    ]
+
+    for suffix, y_off, z_off, ny, nz in outlet_attachment_positions:
+        name = f"outlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(outlet_x, y_off, z_off),
+            normal=(0.0, ny, nz),
+            attachment_type="weld",
+            port_name="outlet",
+        )
+
+    # Store large_nps as the primary NPS (for BOM lookup)
+    # The description field will be used to encode both sizes
+    return Fitting(nps=large_nps, shape=reducer_shape, ports=ports, attachment_points=attachment_points)
 
 
 # =============================================================================

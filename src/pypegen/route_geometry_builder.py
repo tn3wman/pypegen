@@ -20,6 +20,11 @@ import cadquery as cq
 import numpy as np
 
 from .fittings.butt_weld_elbow import ASME_B169_ELBOW90
+from .fittings.butt_weld_reducer import (
+    ASME_B169_REDUCER,
+    get_butt_weld_reducer_dims,
+    validate_reducer,
+)
 from .fittings.butt_weld_tee import ASME_B169_TEE
 from .fittings.pipe_fittings import (
     PIPE_SPECS,
@@ -33,6 +38,7 @@ from .fittings.pipe_fittings import (
     get_position,
     identity_matrix,
     make_butt_weld_elbow_fitting,
+    make_butt_weld_reducer_fitting,
     make_butt_weld_tee_fitting,
     make_pipe,
     make_socket_weld_elbow,
@@ -201,6 +207,35 @@ class RouteGeometryBuilder:
         self._item_counter = 0
         self._weld_counter = 0
 
+    def _save_nps_state(self) -> dict:
+        """Save the current NPS-related state for later restoration.
+
+        This is needed when building branching fittings (tees, crosses) where
+        each branch should start with the same NPS, regardless of whether
+        a sibling branch contains a reducer that changes the NPS.
+        """
+        return {
+            "nps": self.nps,
+            "pipe_spec": self.pipe_spec,
+            "elbow_dims": self.elbow_dims,
+            "butt_weld_elbow_dims": self.butt_weld_elbow_dims,
+            "flange_dims": self.flange_dims,
+            "tee_dims": self.tee_dims,
+            "butt_weld_tee_dims": self.butt_weld_tee_dims,
+            "cross_dims": self.cross_dims,
+        }
+
+    def _restore_nps_state(self, state: dict) -> None:
+        """Restore NPS-related state from a previously saved snapshot."""
+        self.nps = state["nps"]
+        self.pipe_spec = state["pipe_spec"]
+        self.elbow_dims = state["elbow_dims"]
+        self.butt_weld_elbow_dims = state["butt_weld_elbow_dims"]
+        self.flange_dims = state["flange_dims"]
+        self.tee_dims = state["tee_dims"]
+        self.butt_weld_tee_dims = state["butt_weld_tee_dims"]
+        self.cross_dims = state["cross_dims"]
+
     def _add_fitting_with_markers(
         self, fitting: Fitting, world_transform: np.ndarray
     ) -> None:
@@ -298,8 +333,10 @@ class RouteGeometryBuilder:
         """Build a flange fitting."""
         _ = up_vector  # Initial up computed based on direction
 
-        # Create flange
-        fitting = make_weld_neck_flange(node.nps, units="mm")
+        # Create flange with bolt hole orientation
+        fitting = make_weld_neck_flange(
+            node.nps, units="mm", bolt_hole_orientation=node.bolt_hole_orientation
+        )
 
         # Determine if this is a starting flange (root) or ending flange
         is_root_flange = (node is self.route.root)
@@ -672,8 +709,6 @@ class RouteGeometryBuilder:
         up_vector: tuple[float, float, float],
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
         """Build a tee fitting."""
-        branch_direction = direction_name_to_vector(node.branch_direction)
-
         # Create tee based on weld type
         if node.weld_type == "bw":
             fitting = make_butt_weld_tee_fitting(self.nps, units="mm")
@@ -683,6 +718,27 @@ class RouteGeometryBuilder:
             tee_shape = make_socket_weld_tee(self.nps)
             # Create a Fitting object for the tee
             fitting = self._create_tee_fitting(self.nps, tee_shape)
+
+        if node.enter_via_branch:
+            return self._build_tee_branch_entry(
+                node, fitting, tee_shape, incoming_transform, incoming_direction, up_vector
+            )
+        else:
+            return self._build_tee_standard(
+                node, fitting, tee_shape, incoming_transform, incoming_direction, up_vector
+            )
+
+    def _build_tee_standard(
+        self,
+        node: TeeNode,
+        fitting: Fitting,
+        tee_shape,
+        incoming_transform: np.ndarray,
+        incoming_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
+        """Build a tee in standard mode (incoming connects to inlet)."""
+        branch_direction = direction_name_to_vector(node.branch_direction)
 
         # Compute tee transform with up-vector awareness
         tee_transform = self._compute_tee_transform(
@@ -779,14 +835,139 @@ class RouteGeometryBuilder:
         }
 
         # Recursively build children - tee passes "tee_{weld_type}" or "tee_branch_{weld_type}"
+        # Save NPS state before building branches - each branch should start with the same NPS,
+        # regardless of whether a sibling branch contains a reducer that changes the NPS.
+        saved_nps_state = self._save_nps_state()
         tee_run_type = f"tee_{node.weld_type}"
         tee_branch_type = f"tee_branch_{node.weld_type}"
         for port_name, child in node.children.items():
             if port_name in outlets:
+                # Restore NPS state before building each branch
+                self._restore_nps_state(saved_nps_state)
                 transform, dir_vec, up_vec = outlets[port_name]
                 # Use different fitting type for branch vs run
                 fitting_type = tee_branch_type if port_name == "branch" else tee_run_type
                 self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type=fitting_type)
+
+        return outlets
+
+    def _build_tee_branch_entry(
+        self,
+        node: TeeNode,
+        fitting: Fitting,
+        tee_shape,
+        incoming_transform: np.ndarray,
+        incoming_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
+    ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
+        """Build a tee in branch entry mode (incoming connects to branch port)."""
+        run_direction = direction_name_to_vector(node.run_direction)
+        opposite_run = (-run_direction[0], -run_direction[1], -run_direction[2])
+
+        # Compute tee transform for branch entry
+        tee_transform = self._compute_tee_transform_branch_entry(
+            fitting, incoming_transform, incoming_direction, run_direction, up_vector,
+            weld_type=node.weld_type
+        )
+
+        # Add geometry
+        shape = apply_transform_to_shape(tee_shape, tee_transform)
+        self.route.parts.append(shape)
+
+        # Track component
+        run_dir_name = node.run_direction
+        opposite_run_name = vector_to_direction_name(opposite_run)
+        self._add_component(
+            comp_type="tee",
+            description="TEE",
+            schedule_class="Class 3000 SW" if node.weld_type == "sw" else "BW",
+            shape=tee_shape,
+            transform=tee_transform,
+            connected_directions=[
+                vector_to_direction_name(incoming_direction),  # branch inlet
+                run_dir_name,  # run_a
+                opposite_run_name,  # run_b
+            ],
+        )
+
+        # Track fitting and add coordinate frame markers if enabled
+        self._add_fitting_with_markers(fitting, tee_transform)
+
+        # Track welds at all three ports
+        weld_type_str = "SW" if node.weld_type == "sw" else "BW"
+        incoming_dir_name = vector_to_direction_name(incoming_direction)
+
+        # Branch weld (inlet in this mode): avoid run directions
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="PIPE TO TEE",
+            fitting=fitting,
+            port_name="branch",
+            transform=tee_transform,
+            pipe_direction=incoming_dir_name,
+            avoid_direction=run_dir_name,
+        )
+
+        # Inlet port weld (run_b outlet): avoid branch direction
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="TEE TO PIPE",
+            fitting=fitting,
+            port_name="inlet",
+            transform=tee_transform,
+            pipe_direction=opposite_run_name,
+            avoid_direction=incoming_dir_name,
+        )
+
+        # Run port weld (run_a outlet): avoid branch direction
+        self._add_weld(
+            weld_type=weld_type_str,
+            description="TEE TO PIPE",
+            fitting=fitting,
+            port_name="run",
+            transform=tee_transform,
+            pipe_direction=run_dir_name,
+            avoid_direction=incoming_dir_name,
+        )
+
+        # Store transform on node
+        node._world_transform = tee_transform
+        node._fitting = fitting
+        node._built = True
+
+        # Compute outlet transforms with weld gap offsets
+        # In branch entry mode: inlet port becomes run_b, run port becomes run_a
+        inlet_port = fitting.get_port("inlet")
+        run_port = fitting.get_port("run")
+
+        # run_a goes in run_direction (from the "run" port)
+        run_a_outlet_transform = tee_transform @ run_port.transform
+        run_a_outlet_transform = offset_transform_by_gap(run_a_outlet_transform, run_direction)
+
+        # run_b goes opposite to run_direction (from the "inlet" port)
+        run_b_outlet_transform = tee_transform @ inlet_port.transform
+        run_b_outlet_transform = offset_transform_by_gap(run_b_outlet_transform, opposite_run)
+
+        # Compute up-vectors for each outlet
+        # Both run outlets are perpendicular to incoming, compute new up-vectors
+        run_a_up = compute_up_vector_for_branch(incoming_direction, run_direction, up_vector)
+        run_b_up = compute_up_vector_for_branch(incoming_direction, opposite_run, up_vector)
+
+        outlets = {
+            "run_a": (run_a_outlet_transform, run_direction, run_a_up),
+            "run_b": (run_b_outlet_transform, opposite_run, run_b_up),
+        }
+
+        # Recursively build children
+        # Save NPS state before building branches - each branch should start with the same NPS.
+        saved_nps_state = self._save_nps_state()
+        tee_run_type = f"tee_{node.weld_type}"
+        for port_name, child in node.children.items():
+            if port_name in outlets:
+                # Restore NPS state before building each branch
+                self._restore_nps_state(saved_nps_state)
+                transform, dir_vec, up_vec = outlets[port_name]
+                self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type=tee_run_type)
 
         return outlets
 
@@ -866,8 +1047,12 @@ class RouteGeometryBuilder:
         }
 
         # Recursively build children - cross passes "cross" as prev_fitting_type
+        # Save NPS state before building branches - each branch should start with the same NPS.
+        saved_nps_state = self._save_nps_state()
         for port_name, child in node.children.items():
             if port_name in outlets:
+                # Restore NPS state before building each branch
+                self._restore_nps_state(saved_nps_state)
                 transform, dir_vec, up_vec = outlets[port_name]
                 self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="cross")
 
@@ -963,20 +1148,204 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
-        """Build a reducer (stub - geometry TBD)."""
-        # For now, just pass through
-        node._world_transform = incoming_transform
+        """Build a concentric reducer fitting.
+
+        The reducer changes pipe size from current NPS to target NPS.
+        Supports both contraction (large to small) and expansion (small to large).
+        Only butt weld reducers are supported (as is standard for reducers).
+        """
+        current_nps = self.nps
+        target_nps = node.target_nps
+
+        # Validate and determine direction (contraction or expansion)
+        # This will raise a helpful error if the combination doesn't exist
+        large_nps, small_nps, is_expansion = validate_reducer(current_nps, target_nps)
+
+        # Get dimensions (for reference, mainly used in transform computation)
+        reducer_dims = get_butt_weld_reducer_dims(large_nps, small_nps)
+
+        # Create reducer fitting with appropriate port orientation
+        # For expansion, ports are swapped (inlet at small end, outlet at large end)
+        fitting = make_butt_weld_reducer_fitting(
+            large_nps, small_nps, units="mm", reversed=is_expansion
+        )
+
+        # Compute reducer transform
+        # The reducer's local coordinate has large end at X=0, small end at X=H
+        # For contraction: align local +X with incoming_direction
+        # For expansion: align local -X with incoming_direction (flip the reducer)
+        reducer_transform = self._compute_reducer_transform(
+            fitting, incoming_transform, incoming_direction, up_vector, is_expansion
+        )
+
+        # Add geometry
+        if fitting.shape is not None:
+            shape = apply_transform_to_shape(fitting.shape, reducer_transform)
+            self.route.parts.append(shape)
+
+        # Track component with dual NPS in description
+        self._add_component(
+            comp_type="reducer",
+            description=f"CONC REDUCER {large_nps}\" x {small_nps}\"",
+            schedule_class="BW",
+            shape=fitting.shape,
+            transform=reducer_transform,
+            connected_directions=[
+                vector_to_direction_name(incoming_direction),
+                vector_to_direction_name(incoming_direction),  # Same direction, different size
+            ],
+        )
+
+        # Track fitting and add coordinate frame markers if enabled
+        self._add_fitting_with_markers(fitting, reducer_transform)
+
+        # Track welds at both ends
+        incoming_dir_name = vector_to_direction_name(incoming_direction)
+        opposite_dir = (-incoming_direction[0], -incoming_direction[1], -incoming_direction[2])
+        opposite_dir_name = vector_to_direction_name(opposite_dir)
+
+        # Inlet weld (large end): avoid direction is opposite (where outlet is)
+        self._add_weld(
+            weld_type="BW",
+            description="PIPE TO REDUCER",
+            fitting=fitting,
+            port_name="inlet",
+            transform=reducer_transform,
+            pipe_direction=incoming_dir_name,
+            avoid_direction=opposite_dir_name,
+        )
+
+        # Outlet weld (small end): only add if there's a child connected
+        if "outlet" in node.children and node.children["outlet"] is not None:
+            self._add_weld(
+                weld_type="BW",
+                description="REDUCER TO PIPE",
+                fitting=fitting,
+                port_name="outlet",
+                transform=reducer_transform,
+                pipe_direction=incoming_dir_name,
+                avoid_direction=incoming_dir_name,
+            )
+
+        # Store transform on node
+        node._world_transform = reducer_transform
+        node._fitting = fitting
         node._built = True
 
-        outlets = {"outlet": (incoming_transform, incoming_direction, up_vector)}
+        # UPDATE NPS for downstream components
+        # Always use target_nps (works for both contraction and expansion)
+        self.nps = target_nps
+        self.pipe_spec = PIPE_SPECS.get(target_nps)
+        # Update dimension lookups for new size
+        self._update_dimension_lookups_for_nps(target_nps)
 
-        # Reducer passes "reducer" as prev_fitting_type
+        # Compute outlet transform with weld gap offset
+        outlet_port = fitting.get_port("outlet")
+        outlet_transform = reducer_transform @ outlet_port.transform
+        # Add weld gap in the flow direction
+        outlet_transform = offset_transform_by_gap(outlet_transform, incoming_direction)
+
+        outlets = {"outlet": (outlet_transform, incoming_direction, up_vector)}
+
+        # Recursively build children with NEW NPS
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
                 self._build_node(child, transform, dir_vec, up_vec, prev_fitting_type="reducer")
 
         return outlets
+
+    def _compute_reducer_transform(
+        self,
+        fitting: Fitting,
+        incoming_transform: np.ndarray,
+        incoming_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
+        is_expansion: bool = False,
+    ) -> np.ndarray:
+        """
+        Compute the world transform for a concentric reducer.
+
+        The reducer's local coordinate has:
+        - Large end at X=0
+        - Small end at X=H
+        - Centerline along +X
+
+        For contraction: align local +X with flow direction
+          - Large end (X=0) at inlet, small end (X=H) at outlet
+        For expansion: align local -X with flow direction (flip geometry)
+          - Small end (X=H) at inlet, large end (X=0) at outlet
+
+        We position the inlet port at the incoming_transform position.
+        """
+        # For contraction: local +X = flow direction
+        # For expansion: local +X = opposite of flow direction (to flip the reducer)
+        if is_expansion:
+            inc = np.array([-incoming_direction[0], -incoming_direction[1], -incoming_direction[2]], dtype=float)
+        else:
+            inc = np.array(incoming_direction, dtype=float)
+
+        # Use provided up-vector for consistent orientation
+        up = np.array(up_vector, dtype=float)
+
+        # If incoming direction is nearly parallel to up, use a different reference
+        if abs(np.dot(inc, up)) > 0.99:
+            # Use a perpendicular reference
+            up = np.array([0.0, 1.0, 0.0]) if abs(inc[1]) < 0.99 else np.array([1.0, 0.0, 0.0])
+
+        # Build rotation matrix: X = incoming_direction, Z from up-vector
+        # Y = Z × X (to complete right-hand system)
+        # Z = X × Y (orthonormalize)
+        y_vec = np.cross(up, inc)
+        y_norm = np.linalg.norm(y_vec)
+        if y_norm > 1e-6:
+            y_vec = y_vec / y_norm
+        else:
+            # Fallback if somehow parallel
+            y_vec = np.array([0.0, 1.0, 0.0])
+
+        z_vec = np.cross(inc, y_vec)
+        z_vec = z_vec / np.linalg.norm(z_vec)
+
+        # Build rotation matrix
+        rotation = np.eye(4)
+        rotation[:3, 0] = inc      # X-axis = flow direction
+        rotation[:3, 1] = y_vec    # Y-axis
+        rotation[:3, 2] = z_vec    # Z-axis (should be close to up)
+
+        # Get the inlet port's local position
+        # For normal mode: inlet at (0, 0, 0)
+        # For reversed mode: inlet at (H, 0, 0)
+        inlet_port = fitting.get_port("inlet")
+        inlet_local_pos = get_position(inlet_port.transform)
+
+        # World position where inlet should be
+        inlet_world_pos = get_position(incoming_transform)
+
+        # The fitting's local origin needs to be placed such that after rotation,
+        # the inlet port ends up at inlet_world_pos
+        # local_inlet_in_world = rotation @ local_inlet_pos
+        # So origin_in_world = inlet_world_pos - rotation @ local_inlet_pos
+        rotated_inlet_offset = rotation[:3, :3] @ inlet_local_pos
+        origin_world_pos = inlet_world_pos - rotated_inlet_offset
+
+        reducer_transform = translation_matrix(*origin_world_pos) @ rotation
+
+        return reducer_transform
+
+    def _update_dimension_lookups_for_nps(self, new_nps: str) -> None:
+        """Update dimension table references after a reducer changes the NPS."""
+        # Update socket weld dimension lookups
+        self.elbow_dims = ASME_B1611_ELBOW90_CLASS3000.get(new_nps)
+        self.tee_dims = ASME_B1611_TEE_CLASS3000.get(new_nps)
+        self.cross_dims = ASME_B1611_CROSS_CLASS3000.get(new_nps)
+
+        # Update butt weld dimension lookups
+        self.butt_weld_elbow_dims = ASME_B169_ELBOW90.get(new_nps)
+        self.butt_weld_tee_dims = ASME_B169_TEE.get(new_nps)
+
+        # Update flange dimensions
+        self.flange_dims = ASME_B165_CLASS300_WN.get(new_nps)
 
     def _build_terminal(
         self,
@@ -1319,6 +1688,78 @@ class RouteGeometryBuilder:
             inlet_pos[0] + C * incoming_direction[0],
             inlet_pos[1] + C * incoming_direction[1],
             inlet_pos[2] + C * incoming_direction[2],
+        )
+
+        tee_transform = translation_matrix(*center_pos) @ rotation
+
+        return tee_transform
+
+    def _compute_tee_transform_branch_entry(
+        self,
+        fitting: Fitting,
+        incoming_transform: np.ndarray,
+        incoming_direction: tuple[float, float, float],
+        run_direction: tuple[float, float, float],
+        up_vector: tuple[float, float, float],
+        weld_type: str = "sw",
+    ) -> np.ndarray:
+        """
+        Compute transform for a tee in branch entry mode.
+
+        In this mode, the incoming pipe connects to the branch port (local +Y),
+        and the run (local ±X) becomes the two outlets.
+
+        The tee's local geometry:
+        - inlet port at -X (becomes run_b outlet)
+        - run port at +X (becomes run_a outlet)
+        - branch port at +Y (receives incoming pipe)
+        """
+        _ = fitting  # Unused but kept for API consistency
+
+        # Use correct dimensions based on weld type
+        if weld_type == "bw":
+            dims = self.butt_weld_tee_dims
+            if dims is None:
+                raise ValueError(f"No butt weld tee dimensions for NPS {self.nps}")
+        else:
+            dims = self.tee_dims
+            if dims is None:
+                raise ValueError(f"No tee dimensions for NPS {self.nps}")
+
+        M = dims.center_to_end_branch  # Distance from center to branch port
+
+        # Build rotation matrix
+        # Local +X (run direction) maps to world run_direction
+        # Local +Y (branch out) maps to world -incoming_direction (port faces out, flow comes in)
+        run_vec = np.array(run_direction)
+        branch_out_vec = np.array((-incoming_direction[0], -incoming_direction[1], -incoming_direction[2]))
+        up = np.array(up_vector)
+
+        # Compute Z-axis as cross product of run and branch_out
+        z_vec = np.cross(run_vec, branch_out_vec)
+        z_norm = np.linalg.norm(z_vec)
+
+        if z_norm < 1e-6:
+            # Run and branch are parallel (shouldn't happen for a proper tee)
+            z_vec = up
+        else:
+            z_vec = z_vec / z_norm
+            # Ensure Z is in the "up" hemisphere when possible
+            if np.dot(z_vec, up) < 0:
+                z_vec = -z_vec
+
+        # Build rotation matrix [run | branch_out | z]
+        rotation = np.eye(4)
+        rotation[:3, 0] = run_vec
+        rotation[:3, 1] = branch_out_vec
+        rotation[:3, 2] = z_vec
+
+        # Position tee center - offset from branch port position along incoming direction
+        branch_port_pos = get_position(incoming_transform)
+        center_pos = (
+            branch_port_pos[0] + M * incoming_direction[0],
+            branch_port_pos[1] + M * incoming_direction[1],
+            branch_port_pos[2] + M * incoming_direction[2],
         )
 
         tee_transform = translation_matrix(*center_pos) @ rotation
