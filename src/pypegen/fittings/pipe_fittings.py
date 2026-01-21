@@ -50,6 +50,7 @@ import numpy as np
 
 # Import butt weld fittings
 from .butt_weld_elbow import ASME_B169_ELBOW90, make_butt_weld_elbow_90
+from .butt_weld_elbow_45 import ASME_B169_ELBOW45, make_butt_weld_elbow_45
 from .butt_weld_reducer import ASME_B169_REDUCER, make_butt_weld_reducer
 from .butt_weld_tee import ASME_B169_TEE, make_butt_weld_tee
 from .socket_weld_elbow import (
@@ -1065,6 +1066,137 @@ def make_butt_weld_elbow_fitting(nps: str, units: str = "mm") -> Fitting:  # noq
             name=name,
             position=(0, A + y_off, z_off),
             normal=(0.0, ny, nz),
+            attachment_type="weld",
+            port_name="outlet",
+        )
+
+    return Fitting(nps=nps, shape=elbow_shape, ports=ports, attachment_points=attachment_points)
+
+
+# =============================================================================
+# BUTT WELD 45° ELBOW
+# =============================================================================
+
+
+def make_butt_weld_elbow_45_fitting(nps: str, units: str = "mm") -> Fitting:  # noqa: ARG001
+    """
+    Create a butt weld 45° elbow with defined ports.
+
+    Note: 45° elbows are only available in Long Radius (1.5D).
+
+    Coordinate system (butt weld 45° geometry):
+    - Arc centered at origin, from (bend_radius, 0, 0) to a point 45° CCW
+    - At inlet (on +X axis): tangent is +Y, so pipe connects along Y axis
+    - At outlet (at 45°): tangent is perpendicular to radial direction
+
+    Ports:
+    - "inlet": At the +X side, pipe extends in -Y direction
+    - "outlet": At 45° position, pipe extends along tangent direction (outward)
+
+    Port Z-axes point OUTWARD (direction pipe goes when connected).
+    """
+    dims = ASME_B169_ELBOW45.get(nps)
+    if dims is None:
+        raise ValueError(f"No butt weld 45° elbow dimensions for NPS {nps}")
+
+    # Dimensions (in mm)
+    B = dims.center_to_end  # Center to end (B dimension for 45°)
+    r_outer = dims.od / 2.0  # Outer radius for attachment points
+
+    # Calculate bend radius from center-to-end dimension
+    # For a 45° arc: B = R × tan(22.5°)
+    angle_half_rad = math.radians(22.5)
+    bend_radius = B / math.tan(angle_half_rad)
+
+    # Get original butt weld 45° elbow shape
+    elbow_shape = make_butt_weld_elbow_45(nps)
+
+    # Outlet position (at 45° from +X axis)
+    outlet_angle_rad = math.radians(45)
+    outlet_x = bend_radius * math.cos(outlet_angle_rad)
+    outlet_y = bend_radius * math.sin(outlet_angle_rad)
+
+    # Define ports matching the actual geometry face orientations:
+    #
+    # 45° butt weld elbow geometry:
+    # - Arc goes counterclockwise from (bend_radius, 0, 0) to outlet at 45°
+    # - At inlet (bend_radius, 0, 0): tangent is +Y, face perpendicular to Y
+    # - At outlet: tangent points in direction (-sin(45°), cos(45°), 0)
+    #
+    # Port Z points toward where connecting pipe body extends:
+    # - Inlet: pipe body extends in -Y direction (opposite arc direction)
+    # - Outlet: pipe body extends along tangent direction (outward from elbow)
+
+    ports = {}
+
+    # Inlet port: at (bend_radius, 0, 0), pipe connects along Y axis
+    # Z-axis points -Y (opposite of arc tangent direction at inlet)
+    # rotation_matrix_x(90) rotates Z from +Z to -Y
+    inlet_transform = translation_matrix(bend_radius, 0, 0) @ rotation_matrix_x(90)
+    ports["inlet"] = Port("inlet", inlet_transform)
+
+    # Outlet port: at (outlet_x, outlet_y, 0), pipe connects along tangent
+    # The tangent direction at 45° is (-sin(45°), cos(45°), 0) = (-0.707, 0.707, 0)
+    # This is the "flow out" direction. Port Z should point this way.
+    #
+    # To rotate +Z to point in direction (-sin45, cos45, 0):
+    # 1. First rotate +90° around Y to get +Z pointing toward +X
+    # 2. Then rotate 135° around Z to point toward (-sin45, cos45) direction
+    #    (135° = 90° + 45°, since tangent is 90° ahead of radial)
+    outlet_transform = (
+        translation_matrix(outlet_x, outlet_y, 0)
+        @ rotation_matrix_z(135)
+        @ rotation_matrix_y(90)
+    )
+    ports["outlet"] = Port("outlet", outlet_transform)
+
+    # ==========================================================================
+    # WELD ATTACHMENT POINTS
+    # ==========================================================================
+    # Butt weld joints are at the weld end faces.
+
+    attachment_points = {}
+
+    # Inlet weld attachment points at (bend_radius, 0, 0)
+    # Face is in XZ plane (perpendicular to Y)
+    inlet_attachment_positions = [
+        ("up", 0.0, r_outer, 0.0, 1.0),  # +Z
+        ("down", 0.0, -r_outer, 0.0, -1.0),  # -Z
+        ("east", r_outer, 0.0, 1.0, 0.0),  # +X
+        ("west", -r_outer, 0.0, -1.0, 0.0),  # -X
+    ]
+
+    for suffix, x_off, z_off, nx, nz in inlet_attachment_positions:
+        name = f"inlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(bend_radius + x_off, 0, z_off),
+            normal=(nx, 0.0, nz),
+            attachment_type="weld",
+            port_name="inlet",
+        )
+
+    # Outlet weld attachment points at (outlet_x, outlet_y, 0)
+    # Face is perpendicular to tangent direction
+    # Normal vectors need to be rotated by 45° in XY plane
+    cos45 = math.cos(outlet_angle_rad)
+    sin45 = math.sin(outlet_angle_rad)
+
+    outlet_attachment_positions = [
+        ("up", 0.0, 0.0, r_outer, 0.0, 0.0, 1.0),  # +Z
+        ("down", 0.0, 0.0, -r_outer, 0.0, 0.0, -1.0),  # -Z
+        # "outer" - away from bend center (radial outward)
+        ("outer", r_outer * cos45, r_outer * sin45, 0.0, cos45, sin45, 0.0),
+        # "inner" - toward bend center (radial inward)
+        ("inner", -r_outer * cos45, -r_outer * sin45, 0.0, -cos45, -sin45, 0.0),
+    ]
+
+    for suffix, x_off, y_off, z_off, nx, ny, nz in outlet_attachment_positions:
+        name = f"outlet_weld_{suffix}"
+        attachment_points[name] = AttachmentPoint(
+            name=name,
+            position=(outlet_x + x_off, outlet_y + y_off, z_off),
+            normal=(nx, ny, nz),
             attachment_type="weld",
             port_name="outlet",
         )

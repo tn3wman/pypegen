@@ -189,6 +189,7 @@ class BranchBuilder:
         turn_to: str,
         weld_type: WeldType = "sw",
         name: str | None = None,
+        angle: Literal[90, 45] = 90,
     ) -> BranchBuilder:
         """
         Add an elbow turning toward the specified direction.
@@ -197,6 +198,7 @@ class BranchBuilder:
             turn_to: Direction after the elbow (e.g., "up", "north")
             weld_type: "sw" for socket weld, "bw" for butt weld
             name: Optional name for this elbow
+            angle: Elbow angle - 90 for standard elbow, 45 for 45-degree elbow
 
         Returns:
             Self for method chaining
@@ -208,6 +210,7 @@ class BranchBuilder:
             weld_type=weld_type,
             turn_direction=turn_to,
             name=name,
+            angle=angle,
         )
         self._current_node.add_child(self._current_port, node)
         self._current_node = node
@@ -813,6 +816,7 @@ class RouteBuilder:
         turn_to: str,
         weld_type: WeldType = "sw",
         name: str | None = None,
+        angle: Literal[90, 45] = 90,
     ) -> RouteBuilder:
         """
         Add an elbow turning toward the specified direction.
@@ -821,6 +825,7 @@ class RouteBuilder:
             turn_to: Direction after the elbow (e.g., "up", "north")
             weld_type: "sw" for socket weld, "bw" for butt weld
             name: Optional name for this elbow
+            angle: Elbow angle - 90 for standard elbow, 45 for 45-degree elbow
 
         Returns:
             Self for method chaining
@@ -832,6 +837,7 @@ class RouteBuilder:
             weld_type=weld_type,
             turn_direction=turn_to,
             name=name,
+            angle=angle,
         )
         self._current_node.add_child(self._current_port, node)
         self._current_node = node

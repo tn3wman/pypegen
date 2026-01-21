@@ -180,7 +180,7 @@ class PipeSegmentNode(RouteNode):
 @dataclass
 class ElbowNode(RouteNode):
     """
-    90-degree elbow fitting.
+    Elbow fitting (90° or 45°).
 
     Outlets:
         - "outlet": Connection point after the turn
@@ -188,6 +188,7 @@ class ElbowNode(RouteNode):
 
     weld_type: WeldType = "sw"
     turn_direction: str = "up"  # World direction after the elbow
+    angle: Literal[90, 45] = 90  # Elbow angle in degrees
 
     def get_outlet_ports(self) -> list[str]:
         return ["outlet"]

@@ -20,6 +20,7 @@ import cadquery as cq
 import numpy as np
 
 from .fittings.butt_weld_elbow import ASME_B169_ELBOW90
+from .fittings.butt_weld_elbow_45 import ASME_B169_ELBOW45
 from .fittings.butt_weld_reducer import (
     ASME_B169_REDUCER,
     get_butt_weld_reducer_dims,
@@ -38,17 +39,19 @@ from .fittings.pipe_fittings import (
     get_position,
     identity_matrix,
     make_butt_weld_elbow_fitting,
+    make_butt_weld_elbow_45_fitting,
     make_butt_weld_reducer_fitting,
     make_butt_weld_tee_fitting,
     make_pipe,
     make_socket_weld_elbow,
+    make_socket_weld_elbow_45,
     make_weld_neck_flange,
     rotation_matrix_x,
     rotation_matrix_y,
     translation_matrix,
 )
 from .fittings.socket_weld_cross import ASME_B1611_CROSS_CLASS3000, make_socket_weld_cross
-from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000
+from .fittings.socket_weld_elbow import ASME_B1611_ELBOW90_CLASS3000, ASME_B1611_ELBOW45_CLASS3000
 from .fittings.socket_weld_tee import ASME_B1611_TEE_CLASS3000, make_socket_weld_tee
 from .fittings.weld_neck_flange import ASME_B165_CLASS300_WN
 from .pipe_router import (
@@ -91,6 +94,56 @@ except ImportError:
 # =============================================================================
 # DIRECTION UTILITIES
 # =============================================================================
+
+
+def compute_45_degree_turn_direction(
+    incoming_direction: tuple[float, float, float],
+    turn_plane_direction: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Compute the actual output direction after a 45° turn.
+
+    For a 45° elbow, we rotate 45° from the incoming direction toward the
+    turn_plane_direction. The turn_plane_direction specifies the direction
+    a 90° elbow would result in.
+
+    This correctly handles cases where incoming and turn_plane are not
+    perpendicular (e.g., chained 45° elbows).
+
+    Args:
+        incoming_direction: Direction pipe was traveling before the elbow
+        turn_plane_direction: Cardinal direction specifying the turn plane
+                              (what a 90° turn would result in)
+
+    Returns:
+        Unit vector of the actual output direction (45° from incoming)
+    """
+    import math
+
+    inc = np.array(incoming_direction)
+    turn = np.array(turn_plane_direction)
+
+    # Normalize inputs
+    inc = inc / np.linalg.norm(inc)
+    turn = turn / np.linalg.norm(turn)
+
+    # Find the component of turn that's perpendicular to incoming
+    # This defines the direction we're turning toward
+    turn_parallel = np.dot(turn, inc) * inc
+    turn_perp = turn - turn_parallel
+
+    if np.linalg.norm(turn_perp) < 1e-6:
+        # turn is parallel to incoming - can't turn in that direction
+        # This shouldn't happen for valid elbow configurations
+        return tuple(incoming_direction)
+
+    turn_perp = turn_perp / np.linalg.norm(turn_perp)
+
+    # Rotate 45° from incoming toward turn_perp
+    angle = math.radians(45)
+    out_45 = math.cos(angle) * inc + math.sin(angle) * turn_perp
+
+    return (float(out_45[0]), float(out_45[1]), float(out_45[2]))
 
 
 def direction_name_to_vector(name: str) -> tuple[float, float, float]:
@@ -197,7 +250,9 @@ class RouteGeometryBuilder:
 
         # Get dimension tables
         self.elbow_dims = ASME_B1611_ELBOW90_CLASS3000.get(self.nps)
+        self.elbow_45_dims = ASME_B1611_ELBOW45_CLASS3000.get(self.nps)
         self.butt_weld_elbow_dims = ASME_B169_ELBOW90.get(self.nps)
+        self.butt_weld_elbow_45_dims = ASME_B169_ELBOW45.get(self.nps)
         self.flange_dims = ASME_B165_CLASS300_WN.get(self.nps)
         self.tee_dims = ASME_B1611_TEE_CLASS3000.get(self.nps)
         self.butt_weld_tee_dims = ASME_B169_TEE.get(self.nps)
@@ -218,7 +273,9 @@ class RouteGeometryBuilder:
             "nps": self.nps,
             "pipe_spec": self.pipe_spec,
             "elbow_dims": self.elbow_dims,
+            "elbow_45_dims": self.elbow_45_dims,
             "butt_weld_elbow_dims": self.butt_weld_elbow_dims,
+            "butt_weld_elbow_45_dims": self.butt_weld_elbow_45_dims,
             "flange_dims": self.flange_dims,
             "tee_dims": self.tee_dims,
             "butt_weld_tee_dims": self.butt_weld_tee_dims,
@@ -230,7 +287,9 @@ class RouteGeometryBuilder:
         self.nps = state["nps"]
         self.pipe_spec = state["pipe_spec"]
         self.elbow_dims = state["elbow_dims"]
+        self.elbow_45_dims = state["elbow_45_dims"]
         self.butt_weld_elbow_dims = state["butt_weld_elbow_dims"]
+        self.butt_weld_elbow_45_dims = state["butt_weld_elbow_45_dims"]
         self.flange_dims = state["flange_dims"]
         self.tee_dims = state["tee_dims"]
         self.butt_weld_tee_dims = state["butt_weld_tee_dims"]
@@ -475,12 +534,21 @@ class RouteGeometryBuilder:
             start_offset = (self.flange_dims.hub_length + self.flange_dims.raised_face_height) * INCH_TO_MM
         elif prev_type == "elbow":
             # From elbow center - use appropriate dimensions based on weld type
+            # Note: This is for 90° elbows. 45° elbows would have different dimensions
+            # but this is the "previous" fitting, and we use the default (90°) dimensions
             if prev_weld == "bw" and self.butt_weld_elbow_dims is not None:
                 start_offset = self.butt_weld_elbow_dims.center_to_end_lr
             elif self.elbow_dims is not None:
                 start_offset = self.elbow_dims.center_to_end
             else:
                 start_offset = 0.0
+        elif prev_type == "elbow45":
+            # From 45° elbow center
+            # Note: For 45° elbows, the center-to-end dimension is NOT along the pipe axis
+            # at the outlet. The distance from center to outlet along the pipe axis is
+            # approximately 0, so we use 0 offset here. The center-to-end dimension B
+            # is measured perpendicular to the pipe axis.
+            start_offset = 0.0
         elif prev_type == "tee":
             # From tee center (run direction)
             if prev_weld == "bw" and self.butt_weld_tee_dims is not None:
@@ -507,13 +575,21 @@ class RouteGeometryBuilder:
         # Determine end offset based on what comes next
         next_node = node.children.get("end")
         if isinstance(next_node, ElbowNode):
-            # Use appropriate elbow dimensions based on weld type
-            if next_node.weld_type == "bw" and self.butt_weld_elbow_dims is not None:
-                end_offset = self.butt_weld_elbow_dims.center_to_end_lr
-            elif self.elbow_dims is not None:
-                end_offset = self.elbow_dims.center_to_end
-            else:
+            # Use appropriate elbow dimensions based on weld type and angle
+            if next_node.angle == 45:
+                # 45° elbow: the center-to-end dimension is NOT along the pipe axis
+                # at the inlet. The distance from center to inlet along the pipe axis
+                # is approximately 0, so we use 0 offset. The center-to-end dimension B
+                # is measured perpendicular to the pipe axis.
                 end_offset = 0.0
+            else:
+                # 90° elbow (default)
+                if next_node.weld_type == "bw" and self.butt_weld_elbow_dims is not None:
+                    end_offset = self.butt_weld_elbow_dims.center_to_end_lr
+                elif self.elbow_dims is not None:
+                    end_offset = self.elbow_dims.center_to_end
+                else:
+                    end_offset = 0.0
             gap_count = 2  # Gap at both ends
         elif isinstance(next_node, TeeNode):
             # Use appropriate tee dimensions based on weld type
@@ -606,21 +682,42 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
-        """Build an elbow fitting."""
-        turn_direction = direction_name_to_vector(node.turn_direction)
+        """Build an elbow fitting (90° or 45°)."""
+        # The turn_direction from the node is the cardinal direction of the turn plane
+        # For 90° elbows, this IS the output direction
+        # For 45° elbows, the output direction is 45° between incoming and turn_direction
+        turn_plane_direction = direction_name_to_vector(node.turn_direction)
+        elbow_angle = node.angle  # 90 or 45
 
-        # Create elbow based on weld type
-        if node.weld_type == "bw":
-            fitting = make_butt_weld_elbow_fitting(self.nps, units="mm")
-            # Butt weld elbow has different port orientations, use dedicated transform
-            elbow_transform = self._compute_butt_weld_elbow_transform(
-                fitting, incoming_transform, incoming_direction, turn_direction, up_vector
+        if elbow_angle == 45:
+            # Compute actual 45° output direction
+            actual_turn_direction = compute_45_degree_turn_direction(
+                incoming_direction, turn_plane_direction
             )
         else:
-            fitting = make_socket_weld_elbow(self.nps, units="mm")
+            # 90° elbow: output direction is the turn plane direction
+            actual_turn_direction = turn_plane_direction
+
+        # Create elbow based on weld type and angle
+        if node.weld_type == "bw":
+            if elbow_angle == 45:
+                fitting = make_butt_weld_elbow_45_fitting(self.nps, units="mm")
+            else:
+                fitting = make_butt_weld_elbow_fitting(self.nps, units="mm")
+            # Butt weld elbow has different port orientations, use dedicated transform
+            elbow_transform = self._compute_butt_weld_elbow_transform(
+                fitting, incoming_transform, incoming_direction, actual_turn_direction, up_vector,
+                elbow_angle=elbow_angle
+            )
+        else:
+            if elbow_angle == 45:
+                fitting = make_socket_weld_elbow_45(self.nps, units="mm")
+            else:
+                fitting = make_socket_weld_elbow(self.nps, units="mm")
             # Socket weld elbow uses standard transform computation
             elbow_transform = self._compute_elbow_transform(
-                fitting, incoming_transform, incoming_direction, turn_direction, up_vector
+                fitting, incoming_transform, incoming_direction, actual_turn_direction, up_vector,
+                elbow_angle=elbow_angle
             )
 
         # Add geometry
@@ -629,15 +726,16 @@ class RouteGeometryBuilder:
             self.route.parts.append(shape)
 
         # Track component
+        angle_desc = f"{elbow_angle}DEG ELBOW"
         self._add_component(
             comp_type="elbow",
-            description="90DEG ELBOW",
+            description=angle_desc,
             schedule_class="Class 3000 SW" if node.weld_type == "sw" else "BW",
             shape=fitting.shape,
             transform=elbow_transform,
             connected_directions=[
                 vector_to_direction_name(incoming_direction),
-                node.turn_direction,
+                node.turn_direction,  # Use the specified turn plane for tracking
             ],
         )
 
@@ -647,7 +745,8 @@ class RouteGeometryBuilder:
         # Track welds - inlet always, outlet only if there's a child connected
         weld_type_str = "SW" if node.weld_type == "sw" else "BW"
         incoming_dir_name = vector_to_direction_name(incoming_direction)
-        turn_dir_name = node.turn_direction
+        turn_dir_name = node.turn_direction  # Use specified turn plane for description
+        actual_turn_dir_name = vector_to_direction_name(actual_turn_direction)
 
         # Inlet weld: avoid direction is where the elbow goes (turn direction)
         self._add_weld(
@@ -672,7 +771,7 @@ class RouteGeometryBuilder:
                 fitting=fitting,
                 port_name="outlet",
                 transform=elbow_transform,
-                pipe_direction=turn_dir_name,
+                pipe_direction=actual_turn_dir_name,  # Use actual output direction
                 avoid_direction=opposite_incoming,
             )
 
@@ -684,16 +783,19 @@ class RouteGeometryBuilder:
         # Compute outlet transform with weld gap offset
         outlet_port = fitting.get_port("outlet")
         outlet_transform = elbow_transform @ outlet_port.transform
-        # Add weld gap - offset in the turn direction
-        outlet_transform = offset_transform_by_gap(outlet_transform, turn_direction)
+        # Add weld gap - offset in the actual turn direction
+        outlet_transform = offset_transform_by_gap(outlet_transform, actual_turn_direction)
 
         # Compute new up-vector after the elbow turn
-        outlet_up = compute_up_vector_after_elbow(incoming_direction, turn_direction, up_vector)
+        outlet_up = compute_up_vector_after_elbow(incoming_direction, actual_turn_direction, up_vector)
 
-        outlets = {"outlet": (outlet_transform, turn_direction, outlet_up)}
+        outlets = {"outlet": (outlet_transform, actual_turn_direction, outlet_up)}
 
-        # Recursively build children - elbow passes "elbow_{weld_type}" as prev_fitting_type
-        elbow_fitting_type = f"elbow_{node.weld_type}"
+        # Recursively build children - elbow passes "elbow_{weld_type}" or "elbow45_{weld_type}" as prev_fitting_type
+        if node.angle == 45:
+            elbow_fitting_type = f"elbow45_{node.weld_type}"
+        else:
+            elbow_fitting_type = f"elbow_{node.weld_type}"
         for port_name, child in node.children.items():
             if port_name in outlets:
                 transform, dir_vec, up_vec = outlets[port_name]
@@ -1337,11 +1439,13 @@ class RouteGeometryBuilder:
         """Update dimension table references after a reducer changes the NPS."""
         # Update socket weld dimension lookups
         self.elbow_dims = ASME_B1611_ELBOW90_CLASS3000.get(new_nps)
+        self.elbow_45_dims = ASME_B1611_ELBOW45_CLASS3000.get(new_nps)
         self.tee_dims = ASME_B1611_TEE_CLASS3000.get(new_nps)
         self.cross_dims = ASME_B1611_CROSS_CLASS3000.get(new_nps)
 
         # Update butt weld dimension lookups
         self.butt_weld_elbow_dims = ASME_B169_ELBOW90.get(new_nps)
+        self.butt_weld_elbow_45_dims = ASME_B169_ELBOW45.get(new_nps)
         self.butt_weld_tee_dims = ASME_B169_TEE.get(new_nps)
 
         # Update flange dimensions
@@ -1481,16 +1585,26 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
         turn_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
+        elbow_angle: int = 90,
     ) -> np.ndarray:
         """
         Compute transform for an elbow with up-vector awareness.
 
         The elbow's Z-axis (normal to the plane of the elbow) should be
         consistent with the up-vector when possible.
+
+        Args:
+            fitting: The elbow fitting
+            incoming_transform: Transform at the inlet position
+            incoming_direction: Direction the pipe was traveling before the elbow
+            turn_direction: Direction the pipe will travel after the elbow
+            up_vector: Reference up direction
+            elbow_angle: Elbow angle (90 or 45 degrees)
         """
         _ = fitting  # Unused but kept for API consistency
 
-        # Elbow default orientation: inlet from +X, outlet toward +Y
+        # Elbow default orientation: inlet from +X, outlet toward +Y (for 90°)
+        # For 45° elbow: inlet from +X, outlet toward 45° between +X and +Y
         # The elbow lies in the XY plane, with Z perpendicular to it
 
         # Compute the elbow's Z-axis as the cross product of inlet and outlet directions
@@ -1504,7 +1618,7 @@ class RouteGeometryBuilder:
         z_norm = np.linalg.norm(z_vec)
 
         if z_norm < 1e-6:
-            # Directions are parallel (shouldn't happen for 90° elbow)
+            # Directions are parallel (shouldn't happen for elbows)
             # Fall back to up-vector as Z
             z_vec = up
         else:
@@ -1528,9 +1642,15 @@ class RouteGeometryBuilder:
         rotation[:3, 2] = z_vec
 
         # Position elbow so inlet port is at incoming_transform
-        dims = self.elbow_dims
-        if dims is None:
-            raise ValueError(f"No elbow dimensions for NPS {self.nps}")
+        # Get the appropriate elbow dimensions based on angle
+        if elbow_angle == 45:
+            dims = self.elbow_45_dims
+            if dims is None:
+                raise ValueError(f"No 45° elbow dimensions for NPS {self.nps}")
+        else:
+            dims = self.elbow_dims
+            if dims is None:
+                raise ValueError(f"No elbow dimensions for NPS {self.nps}")
 
         A = dims.center_to_end  # Center to socket end
 
@@ -1553,26 +1673,33 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
         turn_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
+        elbow_angle: int = 90,
     ) -> np.ndarray:
         """
         Compute transform for a butt weld elbow.
 
         Butt weld elbow geometry:
-        - Arc centered at origin, from (A, 0, 0) to (0, A, 0)
-        - At inlet (A, 0, 0): arc tangent is +Y (flow direction)
-        - At outlet (0, A, 0): arc tangent is -X (flow direction)
+        - Arc centered at origin in the XY plane
+        - Inlet at (bend_radius, 0, 0) with tangent +Y
+        - For 90°: outlet at (0, bend_radius, 0) with tangent -X
+        - For 45°: outlet at (R*cos45, R*sin45, 0) with tangent (-sin45, cos45, 0)
 
         Port orientations (Z points toward connecting pipe body):
-        - Inlet port Z = -Y (opposite of flow = toward incoming pipe body)
-        - Outlet port Z = -X (same as flow tangent... actually toward outgoing pipe body)
+        - Inlet port Z = -Y (toward incoming pipe body)
+        - Outlet port Z = tangent direction at outlet
 
-        For world transform:
-        - Local +Y (inlet tangent/flow) should map to world incoming_direction
-        - Local -X (outlet tangent/flow) should map to world turn_direction
+        For world transform, we need to rotate so that:
+        - Local +Y (inlet tangent/flow) maps to world incoming_direction
+        - Local XY plane (bend plane) contains both incoming and turn directions
 
-        This gives:
-        - R[:,1] = incoming_direction (local Y → world incoming)
-        - R[:,0] = -turn_direction (local X → world -turn, so -X → +turn)
+        Args:
+            fitting: The elbow fitting
+            incoming_transform: Transform at the inlet position
+            incoming_direction: Direction the pipe was traveling before the elbow
+            turn_direction: Direction the pipe will travel after the elbow (for 45°,
+                           this is the actual 45° output direction)
+            up_vector: Reference up direction
+            elbow_angle: Elbow angle (90 or 45 degrees)
         """
         _ = fitting  # Unused but kept for API consistency
 
@@ -1580,12 +1707,52 @@ class RouteGeometryBuilder:
         out = np.array(turn_direction)
         up = np.array(up_vector)
 
-        # Rotation matrix columns:
-        # col0: where local X goes = -turn (so local -X = outlet tangent goes to +turn)
-        # col1: where local Y goes = incoming (inlet tangent direction)
-        # col2: perpendicular to both for right-handed system
-        col0 = -np.array(turn_direction)
-        col1 = np.array(incoming_direction)  # Changed from -incoming to +incoming
+        # The elbow lies in the XY plane locally:
+        # - Local +Y is the inlet tangent (flow direction into elbow)
+        # - Local +X points toward the bend center from the inlet
+        #   (for CCW arc from +X toward +Y, the bend center is at origin,
+        #    so at inlet position (R,0,0), the center is in -X direction)
+        #
+        # We want:
+        # - Local +Y → world incoming_direction
+        # - Local bend plane (XY) → world plane containing incoming and turn directions
+        #
+        # The elbow bends from +X toward +Y. In world coordinates, this corresponds
+        # to bending from the turn_direction side toward incoming_direction side.
+        #
+        # For a 90° elbow: turn_direction is perpendicular to incoming_direction
+        # For a 45° elbow: turn_direction is 45° from incoming_direction
+
+        # Build rotation matrix:
+        # col1 (where local Y goes) = incoming_direction (inlet tangent)
+        col1 = inc / np.linalg.norm(inc)
+
+        # col0 (where local X goes) should be perpendicular to col1 and in the bend plane
+        # The bend plane contains both incoming and turn directions
+        # Local +X points "toward the turn side" from inlet perspective
+        #
+        # For 90° elbow: local -X maps to turn_direction
+        # For 45° elbow: local outlet tangent (-sin45, cos45, 0) maps to turn_direction
+        #
+        # To find col0: it should be in the plane of inc and out, perpendicular to inc
+        # Project out onto the plane perpendicular to inc, then normalize
+        out_parallel = np.dot(out, col1) * col1
+        out_perp = out - out_parallel  # Component of out perpendicular to inc
+
+        if np.linalg.norm(out_perp) < 1e-6:
+            # inc and out are parallel (shouldn't happen for valid elbow)
+            # Use up vector as fallback
+            out_perp = up - np.dot(up, col1) * col1
+
+        out_perp = out_perp / np.linalg.norm(out_perp)
+
+        # Local +X should point opposite to the turn direction component perpendicular to incoming
+        # (because the arc goes from +X toward +Y, so outlet is "toward +Y" from center)
+        # For CCW arc: bend center is at -X from inlet, outlet is at angle θ
+        # When θ=90°, outlet tangent is -X. When θ=45°, outlet tangent is at 135° from +X.
+        col0 = -out_perp
+
+        # col2 is perpendicular to both (right-hand rule)
         z_vec = np.cross(col0, col1)
         z_norm = np.linalg.norm(z_vec)
 
@@ -1599,25 +1766,37 @@ class RouteGeometryBuilder:
         rotation[:3, 1] = col1
         rotation[:3, 2] = z_vec
 
-        # Get butt weld elbow dimensions
-        dims = self.butt_weld_elbow_dims
-        if dims is None:
-            raise ValueError(f"No butt weld elbow dimensions for NPS {self.nps}")
-
-        A = dims.center_to_end_lr  # Center to end (bend radius)
+        # Get butt weld elbow dimensions based on angle
+        # Note: For positioning, we need the inlet offset from elbow center,
+        # which is the bend radius (NOT the center-to-end dimension for 45° elbows)
+        if elbow_angle == 45:
+            dims = self.butt_weld_elbow_45_dims
+            if dims is None:
+                raise ValueError(f"No butt weld 45° elbow dimensions for NPS {self.nps}")
+            # For 45° elbow: inlet is at local (bend_radius, 0, 0)
+            # bend_radius = B / tan(22.5°) where B = center_to_end
+            import math
+            B = dims.center_to_end
+            inlet_offset = B / math.tan(math.radians(22.5))  # This is the bend radius
+        else:
+            dims = self.butt_weld_elbow_dims
+            if dims is None:
+                raise ValueError(f"No butt weld elbow dimensions for NPS {self.nps}")
+            # For 90° elbow: inlet at local (A, 0, 0) where A = center_to_end_lr = bend radius
+            inlet_offset = dims.center_to_end_lr
 
         # Position elbow so inlet is at incoming_transform position
-        # Butt weld elbow: inlet at local (A, 0, 0)
-        # After rotation R, inlet offset from center = A * col0 = A * (-turn)
-        # So: inlet_world = center + A * (-turn)
+        # Butt weld elbow: inlet at local (inlet_offset, 0, 0)
+        # After rotation R, inlet offset from center = inlet_offset * col0
+        # So: inlet_world = center + inlet_offset * col0
         # We want: inlet_world = inlet_pos
-        # Therefore: center = inlet_pos + A * turn
+        # Therefore: center = inlet_pos - inlet_offset * col0
         inlet_pos = get_position(incoming_transform)
 
         center_pos = (
-            inlet_pos[0] + A * turn_direction[0],
-            inlet_pos[1] + A * turn_direction[1],
-            inlet_pos[2] + A * turn_direction[2],
+            inlet_pos[0] - inlet_offset * col0[0],
+            inlet_pos[1] - inlet_offset * col0[1],
+            inlet_pos[2] - inlet_offset * col0[2],
         )
 
         elbow_transform = translation_matrix(*center_pos) @ rotation

@@ -25,6 +25,7 @@ from .pipe_fittings import (
     translation_matrix,
     # Fitting factories
     make_butt_weld_elbow_fitting,
+    make_butt_weld_elbow_45_fitting,
     make_butt_weld_reducer_fitting,
     make_butt_weld_tee_fitting,
     make_pipe,
@@ -51,6 +52,14 @@ from .butt_weld_reducer import (
     make_butt_weld_reducer,
     nps_to_float,
     validate_reducer,
+)
+
+# Butt weld 45° elbow dimension data and utilities
+from .butt_weld_elbow_45 import (
+    ASME_B169_ELBOW45,
+    ButtWeldElbow45Dims,
+    make_butt_weld_elbow_45,
+    make_solid_elbow_45,
 )
 
 # Gasket dimension data
@@ -89,6 +98,7 @@ __all__ = [
     "translation_matrix",
     # Fitting factories
     "make_butt_weld_elbow_fitting",
+    "make_butt_weld_elbow_45_fitting",
     "make_butt_weld_reducer_fitting",
     "make_butt_weld_tee_fitting",
     "make_pipe",
@@ -124,4 +134,9 @@ __all__ = [
     "make_butt_weld_reducer",
     "nps_to_float",
     "validate_reducer",
+    # Butt weld 45° elbow dimension data and utilities
+    "ASME_B169_ELBOW45",
+    "ButtWeldElbow45Dims",
+    "make_butt_weld_elbow_45",
+    "make_solid_elbow_45",
 ]

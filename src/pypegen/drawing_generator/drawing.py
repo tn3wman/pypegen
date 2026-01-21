@@ -1709,11 +1709,8 @@ class PipingDrawing:
         # Add BOM table (after title block)
         svg_content.append(self._create_bom_table())
 
-        # Add balloon leaders (after geometry to render on top)
-        svg_content.append(self._create_balloons())
-
-        # Add weld markers (after balloons)
-        svg_content.append(self._create_weld_markers())
+        # Add annotations (balloons + weld markers) after geometry to render on top
+        svg_content.append(self._create_annotations())
 
         # Add debug markers for attachment point positions (only if show_debug is enabled)
         if self.show_debug:

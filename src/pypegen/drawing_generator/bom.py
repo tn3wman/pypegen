@@ -386,7 +386,8 @@ class AnnotationPlacementContext:
 
         # Minimum sizes for readability
         min_balloon_radius = 3.0
-        min_weld_size = 2.5
+        # Keep weld collision sizing at least as large as the rendered slot label.
+        min_weld_size = WELD_MARKER_SIZE
         min_leader = 6.0
 
         self.effective_balloon_radius = max(
@@ -505,7 +506,16 @@ def _leader_crosses_pipe(
 
 
 # Weld marker styling constants
-WELD_MARKER_SIZE = 3.5         # mm - size of weld marker oval
+#
+# NOTE: Weld markers render as a fixed-size "slot" (pill) label. `WELD_MARKER_SIZE`
+# is used as a collision radius for placement/optimization; keep it consistent
+# with the rendered slot dimensions.
+WELD_MARKER_SLOT_HEIGHT = BALLOON_RADIUS * 2  # mm - slot height (matches balloon diameter)
+WELD_MARKER_SLOT_WIDTH = 14.0                # mm - slot width to fit "WELD #"
+WELD_MARKER_SIZE = math.hypot(               # mm - collision radius (half-diagonal)
+    WELD_MARKER_SLOT_WIDTH / 2,
+    WELD_MARKER_SLOT_HEIGHT / 2,
+)
 WELD_MARKER_OFFSET = 18.0      # mm - offset from weld point to label (increased for clarity)
 WELD_MARKER_STROKE = 0.3       # mm - stroke width
 WELD_FONT_SIZE = 2.5           # mm - font size for weld number
@@ -2169,9 +2179,9 @@ def render_weld_markers_svg(weld_markers: list[WeldMarker]) -> str:
     svg_parts = ['<!-- Weld Markers -->']
 
     # Slot dimensions - height matches BOM balloon diameter
-    slot_height = BALLOON_RADIUS * 2  # Same diameter as BOM balloons (8mm)
-    slot_radius = slot_height / 2     # Radius for rounded ends
-    slot_width = 14.0                 # Width to fit "WELD #" text
+    slot_height = WELD_MARKER_SLOT_HEIGHT
+    slot_radius = slot_height / 2  # Radius for rounded ends
+    slot_width = WELD_MARKER_SLOT_WIDTH
 
     for marker in weld_markers:
         wx, wy = marker.position
@@ -2246,8 +2256,11 @@ def create_weld_markers(
     Returns:
         List of WeldMarker objects ready for rendering
     """
-    markers = []
-    placed_positions = []  # Track placed label positions to avoid overlap
+    markers: list[WeldMarker] = []
+
+    # Track already-placed label boxes and leader segments for overlap/crossing checks
+    placed_label_rects: list[tuple[float, float, float, float]] = []
+    placed_leaders: list[tuple[tuple[float, float], tuple[float, float]]] = []
 
     # Use context sizes if available, otherwise use defaults
     if context:
@@ -2257,142 +2270,243 @@ def create_weld_markers(
         weld_offset = WELD_MARKER_OFFSET
         weld_size = WELD_MARKER_SIZE
 
-    if existing_markers:
-        placed_positions = [m.label_position for m in existing_markers]
+    # Rendered slot label extents (axis-aligned)
+    half_w = WELD_MARKER_SLOT_WIDTH / 2.0
+    half_h = WELD_MARKER_SLOT_HEIGHT / 2.0
+    rect_padding = max(0.75, weld_size * 0.05)  # small safety margin for stroke/text
 
-    # Fallback direction candidates (if pipe_direction not available)
+    def _label_rect(center: tuple[float, float]) -> tuple[float, float, float, float]:
+        x, y = center
+        return (x - half_w, y - half_h, x + half_w, y + half_h)
+
+    def _rects_overlap(
+        r1: tuple[float, float, float, float],
+        r2: tuple[float, float, float, float],
+        padding: float = 0.0,
+    ) -> bool:
+        x1a, y1a, x2a, y2a = r1
+        x1b, y1b, x2b, y2b = r2
+        return (
+            (x1a - padding) < (x2b + padding)
+            and (x2a + padding) > (x1b - padding)
+            and (y1a - padding) < (y2b + padding)
+            and (y2a + padding) > (y1b - padding)
+        )
+
+    def _circle_overlaps_rect(
+        circle_center: tuple[float, float],
+        circle_radius: float,
+        rect: tuple[float, float, float, float],
+    ) -> bool:
+        cx, cy = circle_center
+        rx1, ry1, rx2, ry2 = rect
+        nearest_x = min(max(cx, rx1), rx2)
+        nearest_y = min(max(cy, ry1), ry2)
+        dx = cx - nearest_x
+        dy = cy - nearest_y
+        return (dx * dx + dy * dy) < (circle_radius * circle_radius)
+
+    def _rect_in_bounds(
+        rect: tuple[float, float, float, float],
+        area: ViewArea,
+        margin: float = 0.0,
+    ) -> bool:
+        x1, y1, x2, y2 = rect
+        return (
+            x1 >= area.x + margin
+            and y1 >= area.y + margin
+            and x2 <= area.x + area.width - margin
+            and y2 <= area.y + area.height - margin
+        )
+
+    def _norm(dx: float, dy: float) -> tuple[float, float]:
+        n = math.sqrt(dx * dx + dy * dy)
+        if n <= 0:
+            return (0.0, 0.0)
+        return (dx / n, dy / n)
+
+    def _leader_end(
+        weld_pos: tuple[float, float],
+        label_pos: tuple[float, float],
+    ) -> tuple[float, float]:
+        """Match the leader endpoint logic used during SVG rendering."""
+        wx, wy = weld_pos
+        lx, ly = label_pos
+        dx = wx - lx
+        dy = wy - ly
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist > 0:
+            return (
+                lx + (dx / dist) * half_w,
+                ly + (dy / dist) * half_h,
+            )
+        return label_pos
+
+    # Seed collision state from existing markers
+    if existing_markers:
+        for m in existing_markers:
+            placed_label_rects.append(_label_rect(m.label_position))
+            placed_leaders.append((m.position, _leader_end(m.position, m.label_position)))
+
+    # Fallback direction candidates (if topology directions not available)
     fallback_directions = [
-        (1, -1),   # up-right
-        (-1, -1),  # up-left
-        (1, 1),    # down-right
-        (-1, 1),   # down-left
+        _norm(1, -1),   # up-right
+        _norm(-1, -1),  # up-left
+        _norm(1, 1),    # down-right
+        _norm(-1, 1),   # down-left
     ]
 
     for weld in welds:
-        # Project 3D centerline position to 2D
+        # Project 3D weld position to 2D (may already be on OD via attachment points)
         x3d, y3d, z3d = weld.world_position_3d
-        svg_center = coord_mapper.world_to_svg(x3d, y3d, z3d)
-
-        if svg_center is None:
+        svg_weld = coord_mapper.world_to_svg(x3d, y3d, z3d)
+        if svg_weld is None:
             continue
 
-        cx, cy = svg_center
-        best_weld_pos = None
-        best_label_pos = None
+        weld_x, weld_y = svg_weld
 
-        # If we have pipe direction, compute perpendicular screen direction
+        # Preferred label direction in screen space
         if weld.pipe_direction:
-            # Get the perpendicular direction in screen space
-            perp_dir = compute_pipe_perpendicular_screen_direction(weld.pipe_direction)
-
-            # Check if we need to avoid a direction (e.g., where next pipe goes)
-            # If the computed perpendicular aligns with the avoid direction, flip it
-            if weld.avoid_direction and weld.avoid_direction in WORLD_DIR_TO_SCREEN_OFFSET:
-                avoid_screen = WORLD_DIR_TO_SCREEN_OFFSET[weld.avoid_direction]
-                # Check if perpendicular points toward the avoid direction
-                # Use dot product: positive means same general direction
-                dot = perp_dir[0] * avoid_screen[0] + perp_dir[1] * avoid_screen[1]
-                if dot > 0.3:  # If pointing toward avoid direction, flip
-                    perp_dir = (-perp_dir[0], -perp_dir[1])
-
-            # Try the (possibly flipped) perpendicular direction first
-            directions_to_try = [
-                perp_dir,
-                (-perp_dir[0], -perp_dir[1]),  # Opposite perpendicular
-            ]
+            base_dx, base_dy = compute_weld_label_screen_direction(
+                weld.pipe_direction,
+                attachment_direction=weld.attachment_direction,
+                avoid_direction=weld.avoid_direction,
+            )
+            base_dir = _norm(base_dx, base_dy)
         else:
-            directions_to_try = fallback_directions
+            base_dir = fallback_directions[0]
 
-        # Edge offset: compute the visible pipe edge in screen space
-        # The 3D weld position is at the centerline; we need to offset to the
-        # visible pipe edge. In isometric projection, the visible half-width
-        # of a pipe is: pipe_radius * fit_scale / 2 (the /2 is the isometric
-        # foreshortening factor for perpendicular offsets).
-        #
-        # This matches how BOM balloons find edges using actual SVG geometry.
-        if weld.pipe_radius_mm is not None and coord_mapper.fit_scale > 0:
-            # Compute visible edge offset using proper coordinate transformation
+        # Optional: if the weld record is still at centerline (no attachment dir),
+        # offset the leader start toward the visible edge.
+        if weld.attachment_direction is None and weld.pipe_radius_mm is not None and coord_mapper.fit_scale > 0:
             edge_offset = weld.pipe_radius_mm * coord_mapper.fit_scale / 2.0
-        elif weld.weld_type == "BW":
-            edge_offset = 8.0  # Fallback for butt welds without radius info
-        else:
-            edge_offset = 6.0  # Fallback for socket welds without radius info
+            weld_x += base_dir[0] * edge_offset
+            weld_y += base_dir[1] * edge_offset
 
-        for direction in directions_to_try:
-            dx, dy = direction
+        weld_pos = (weld_x, weld_y)
 
-            # Normalize direction
-            norm = math.sqrt(dx**2 + dy**2)
-            if norm > 0:
-                dx, dy = dx / norm, dy / norm
+        # Candidate directions: include iso base/perp first, then 8-way fallbacks
+        candidate_dirs: list[tuple[float, float]] = []
 
-            # Weld point is at the pipe edge (offset from centerline)
-            weld_x = cx + dx * edge_offset
-            weld_y = cy + dy * edge_offset
+        def _add_dir(d: tuple[float, float]) -> None:
+            dx, dy = _norm(d[0], d[1])
+            if dx == 0.0 and dy == 0.0:
+                return
+            for ex, ey in candidate_dirs:
+                if (dx - ex) ** 2 + (dy - ey) ** 2 < 1e-4:
+                    return
+            candidate_dirs.append((dx, dy))
 
-            # Label is further out along the same direction
-            label_x = weld_x + dx * weld_offset
-            label_y = weld_y + dy * weld_offset
+        _add_dir(base_dir)
+        if weld.pipe_direction:
+            perp = compute_pipe_perpendicular_screen_direction(weld.pipe_direction)
+            _add_dir(perp)
+            _add_dir((-perp[0], -perp[1]))
+        _add_dir((-base_dir[0], -base_dir[1]))
 
-            # Check bounds (if view_area provided)
-            if view_area:
-                margin = weld_size * 1.5
-                if (label_x - margin < view_area.x or
-                    label_x + margin > view_area.x + view_area.width or
-                    label_y - margin < view_area.y or
-                    label_y + margin > view_area.y + view_area.height):
-                    continue  # Out of bounds, try next direction
+        eight_dirs = [
+            (0.0, -1.0),
+            (0.707, -0.707),
+            (1.0, 0.0),
+            (0.707, 0.707),
+            (0.0, 1.0),
+            (-0.707, 0.707),
+            (-1.0, 0.0),
+            (-0.707, -0.707),
+        ]
 
-            # Check overlap with existing markers
-            overlap = False
-            min_dist = weld_size * 3  # Minimum distance between labels
-            for px, py in placed_positions:
-                dist = math.sqrt((label_x - px)**2 + (label_y - py)**2)
-                if dist < min_dist:
-                    overlap = True
+        avoid_screen = None
+        if weld.avoid_direction and weld.avoid_direction in WORLD_DIR_TO_SCREEN_OFFSET:
+            ax, ay = WORLD_DIR_TO_SCREEN_OFFSET[weld.avoid_direction]
+            avoid_screen = _norm(ax, ay)
+
+        def _dir_score(d: tuple[float, float]) -> float:
+            dot_pref = d[0] * base_dir[0] + d[1] * base_dir[1]
+            if avoid_screen:
+                dot_avoid = d[0] * avoid_screen[0] + d[1] * avoid_screen[1]
+                return dot_pref - max(0.0, dot_avoid) * 0.75
+            return dot_pref
+
+        eight_dirs.sort(key=_dir_score, reverse=True)
+        for d in eight_dirs:
+            _add_dir(d)
+
+        # Candidate distances (increasing) to escape dense clusters
+        step = 6.0
+        distances = [weld_offset + step * i for i in range(0, 7)]
+
+        best_label_pos: tuple[float, float] | None = None
+        best_score = float("inf")
+
+        for dx, dy in candidate_dirs:
+            # Angle penalty: keep close to preferred direction when possible
+            angle_penalty = (1.0 - (dx * base_dir[0] + dy * base_dir[1])) * 8.0
+
+            for dist in distances:
+                label_x = weld_x + dx * dist
+                label_y = weld_y + dy * dist
+                label_pos = (label_x, label_y)
+                rect = _label_rect(label_pos)
+
+                if view_area and not _rect_in_bounds(rect, view_area, margin=0.0):
+                    continue
+
+                # Count overlaps with previously placed weld labels
+                overlap_count = 0
+                for r in placed_label_rects:
+                    if _rects_overlap(rect, r, padding=rect_padding):
+                        overlap_count += 1
+
+                # Overlap with BOM balloons (circle vs slot box)
+                balloon_overlap = False
+                if placed_balloons:
+                    for balloon in placed_balloons:
+                        if _circle_overlaps_rect(balloon.center, balloon.radius + 1.5, rect):
+                            balloon_overlap = True
+                            break
+
+                # Leader crossing checks
+                leader_crosses_pipe = False
+                if pipe_segments_2d:
+                    leader_crosses_pipe = _leader_crosses_pipe(
+                        weld_pos, _leader_end(weld_pos, label_pos), pipe_segments_2d
+                    )
+
+                leader_cross_count = 0
+                if placed_leaders:
+                    candidate_end = _leader_end(weld_pos, label_pos)
+                    for s, e in placed_leaders:
+                        if _line_segments_intersect(weld_pos, candidate_end, s, e):
+                            leader_cross_count += 1
+
+                # Score: prioritize no overlaps, then no crossings, then shorter leaders
+                score = angle_penalty + dist * 0.15
+                if balloon_overlap:
+                    score += 500.0
+                if leader_crosses_pipe:
+                    score += 300.0
+                score += leader_cross_count * 700.0
+                score += overlap_count * 1200.0
+
+                if score < best_score:
+                    best_score = score
+                    best_label_pos = label_pos
+
+                # Early exit for a clean placement close to the preferred direction
+                if score < 1.0:
                     break
-
-            # Check overlap with BOM balloons
-            if not overlap and placed_balloons:
-                balloon_margin = weld_size * 2
-                for balloon in placed_balloons:
-                    bx, by = balloon.center
-                    dist = math.sqrt((label_x - bx)**2 + (label_y - by)**2)
-                    if dist < balloon.radius + balloon_margin:
-                        overlap = True
-                        break
-
-            # Check if leader line crosses any pipe geometry
-            if not overlap and pipe_segments_2d:
-                if _leader_crosses_pipe(
-                    (weld_x, weld_y),
-                    (label_x, label_y),
-                    pipe_segments_2d
-                ):
-                    overlap = True
-
-            if not overlap:
-                best_weld_pos = (weld_x, weld_y)
-                best_label_pos = (label_x, label_y)
+            if best_score < 1.0:
                 break
 
-        # If no good position found, use first direction as fallback
         if best_label_pos is None:
-            direction = directions_to_try[0] if directions_to_try else fallback_directions[0]
-            norm = math.sqrt(direction[0]**2 + direction[1]**2)
-            dx, dy = direction[0] / norm, direction[1] / norm
-            weld_x = cx + dx * edge_offset
-            weld_y = cy + dy * edge_offset
-            best_weld_pos = (weld_x, weld_y)
-            best_label_pos = (weld_x + dx * weld_offset, weld_y + dy * weld_offset)
+            best_label_pos = (weld_x + base_dir[0] * weld_offset, weld_y + base_dir[1] * weld_offset)
 
-        placed_positions.append(best_label_pos)
-        # best_weld_pos is always set: either in the loop above or in the fallback
-        assert best_weld_pos is not None
+        placed_label_rects.append(_label_rect(best_label_pos))
+        placed_leaders.append((weld_pos, _leader_end(weld_pos, best_label_pos)))
         markers.append(WeldMarker(
             weld_number=weld.weld_number,
             weld_type=weld.weld_type,
-            position=best_weld_pos,
+            position=weld_pos,
             label_position=best_label_pos
         ))
 
