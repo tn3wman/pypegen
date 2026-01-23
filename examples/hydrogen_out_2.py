@@ -30,7 +30,7 @@ def nested_tee_example():
     builder.add_pipe(f"{p_2} in")
     builder.add_elbow("east", "bw")
 
-    p_3 = 78.258188976 - 0.792500000 - 10 + 3.062993927
+    p_3 = 78.258188976 - 0.792500000 - 10 + 3.062993927 + 0.313935207
     builder.add_pipe(f"{p_3} in")
 
     x = 23.694500300

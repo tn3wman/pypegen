@@ -190,7 +190,7 @@ ASME_B169_REDUCER: dict[tuple[str, str], ButtWeldReducerDims] = {
     # 2-1/2" reducers
     ("2-1/2", "2"): ButtWeldReducerDims(
         large_od=73.0, small_od=60.3,
-        large_wall=5.16, small_wall=3.91, length_h=89.0
+        large_wall=5.16, small_wall=3.91, length_h=88.9
     ),
     ("2-1/2", "1-1/2"): ButtWeldReducerDims(
         large_od=73.0, small_od=48.3,

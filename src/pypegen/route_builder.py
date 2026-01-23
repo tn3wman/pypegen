@@ -107,18 +107,234 @@ class BranchingPipeRoute:
     # Private state
     _built: bool = field(default=False, repr=False)
 
+    def _format_length_inches(self, length_mm: float) -> str:
+        """
+        Format length in mm to inches with fractional notation (nearest 1/16").
+
+        Args:
+            length_mm: Length in millimeters
+
+        Returns:
+            String like '3-1/2"' or '10-5/16"'
+        """
+        total_inches = length_mm / 25.4
+        whole_inches = int(total_inches)
+        fractional = total_inches - whole_inches
+
+        # Convert to nearest 1/16
+        sixteenths = round(fractional * 16)
+
+        # Handle rollover
+        if sixteenths == 16:
+            sixteenths = 0
+            whole_inches += 1
+
+        # Build fractional string (reduce to lowest terms)
+        if sixteenths == 0:
+            return f'{whole_inches}"'
+        elif sixteenths == 8:
+            return f'{whole_inches}-1/2"'
+        elif sixteenths == 4:
+            return f'{whole_inches}-1/4"'
+        elif sixteenths == 12:
+            return f'{whole_inches}-3/4"'
+        elif sixteenths % 4 == 0:
+            return f'{whole_inches}-{sixteenths // 4}/4"'
+        elif sixteenths % 2 == 0:
+            return f'{whole_inches}-{sixteenths // 2}/8"'
+        else:
+            return f'{whole_inches}-{sixteenths}/16"'
+
+    def _generate_part_name(self, component: ComponentRecord) -> str:
+        """
+        Generate a standardized part name for STEP export.
+
+        Format: {nps}" {class/schedule} {description} {length if applicable}
+
+        Examples:
+            - 2" Class 300 WN Flange
+            - 2" Sch 40 90Deg LR BW Elbow
+            - 2" Class 3000 SW Tee
+            - 2" Sch 40 Pipe 10-5/16"
+
+        Args:
+            component: ComponentRecord with component metadata
+
+        Returns:
+            Standardized part name string
+        """
+        parts = []
+
+        # Determine weld type from schedule_class
+        sched_upper = component.schedule_class.upper()
+        is_socket_weld = "SW" in sched_upper or "CLASS 3000" in sched_upper
+        # BW alone (not in "Class 3000 BW") means butt weld fitting
+        is_butt_weld = sched_upper == "BW" or "BW" in sched_upper
+
+        # Description - format based on component type
+        desc = component.description.upper()
+        comp_type = component.component_type
+
+        if comp_type == "flange":
+            # Size first
+            parts.append(f'{component.nps}"')
+            parts.append(f"Class {self.flange_class}")
+            parts.append("WN Flange")
+
+        elif comp_type == "elbow":
+            # Size first
+            parts.append(f'{component.nps}"')
+
+            # Schedule/Class
+            if is_socket_weld:
+                parts.append("Class 3000")
+            else:
+                parts.append(f"Sch {self.schedule}")
+
+            # Parse angle from description
+            if "45" in desc:
+                angle_str = "45Deg"
+            else:
+                # Only BW elbows are LR (long radius), SW elbows are not
+                angle_str = "90Deg LR" if is_butt_weld else "90Deg"
+
+            # Add weld type
+            if is_socket_weld:
+                parts.append(f"{angle_str} SW Elbow")
+            else:
+                parts.append(f"{angle_str} BW Elbow")
+
+        elif comp_type == "tee":
+            # Size first
+            parts.append(f'{component.nps}"')
+
+            # Schedule/Class
+            if is_socket_weld:
+                parts.append("Class 3000")
+                parts.append("SW Tee")
+            else:
+                parts.append(f"Sch {self.schedule}")
+                parts.append("BW Tee")
+
+        elif comp_type == "cross":
+            # Size first
+            parts.append(f'{component.nps}"')
+
+            # Schedule/Class
+            if is_socket_weld:
+                parts.append("Class 3000")
+                parts.append("SW Cross")
+            else:
+                parts.append(f"Sch {self.schedule}")
+                parts.append("BW Cross")
+
+        elif comp_type == "pipe":
+            # Size first
+            parts.append(f'{component.nps}"')
+            parts.append(f"Sch {self.schedule}")
+            parts.append("Pipe")
+
+            # Length (for pipes)
+            if component.length_mm is not None and component.length_mm > 0:
+                length_str = self._format_length_inches(component.length_mm)
+                parts.append(length_str)
+
+        elif comp_type == "reducer":
+            # Parse dimensions from description (e.g., 'CONC REDUCER 2" x 1-1/2"')
+            # Extract both NPS values - handle optional quotes and case-insensitive X
+            import re
+            match = re.search(r'(\d+[-/\d]*)"?\s*[xX]\s*(\d+[-/\d]*)', desc)
+            if match:
+                large_nps = match.group(1)
+                small_nps = match.group(2)
+                parts.append(f'{large_nps}" x {small_nps}"')
+            else:
+                # Fallback to component NPS
+                parts.append(f'{component.nps}"')
+
+            parts.append(f"Sch {self.schedule}")
+            parts.append("Conc BW Reducer")
+
+        else:
+            # Fallback - use description as-is but title case
+            parts.append(f'{component.nps}"')
+            if is_socket_weld:
+                parts.append("Class 3000")
+            elif is_butt_weld:
+                parts.append(f"Sch {self.schedule}")
+            parts.append(component.description.title())
+
+        return " ".join(parts)
+
     def export(self, filename: str) -> None:
-        """Export the route geometry to a STEP file."""
+        """
+        Export the route geometry to a STEP file with proper part names.
+
+        Parts are named according to the standard format:
+        {nps}" {class/schedule} {description} {length if applicable}
+
+        Examples:
+            - 2" Class 300 WN Flange
+            - 2" Sch 40 90Deg LR BW Elbow
+            - 2" Class 3000 SW Tee
+            - 2" Sch 40 Pipe 10-5/16"
+        """
         if not self._built:
             raise RuntimeError("Route has not been built yet. Call build() first.")
         if not self.parts:
             raise RuntimeError("No geometry to export.")
 
+        import warnings
+
         import cadquery as cq
 
-        # Combine all parts into a single compound
-        compound = cq.Compound.makeCompound(self.parts)
-        cq.exporters.export(compound, filename)
+        # Use Assembly for proper part naming in STEP export
+        assembly = cq.Assembly(name="Pipe Assembly")
+
+        # Track part counts for unique naming (append sequence number if duplicates)
+        name_counts: dict[str, int] = {}
+
+        # When coordinate frames are enabled, parts may include debug markers
+        # that don't have corresponding component records. Handle this by:
+        # 1. If counts match, use 1:1 correspondence
+        # 2. If parts > components (debug markers), name components first, then markers
+        # 3. Otherwise, fall back to generic names
+
+        num_parts = len(self.parts)
+        num_components = len(self.components) if self.components else 0
+
+        if num_components > 0 and num_parts >= num_components:
+            # Name the first N parts using component metadata
+            for i, component in enumerate(self.components):
+                base_name = self._generate_part_name(component)
+
+                # Handle duplicate names by appending sequence number
+                if base_name in name_counts:
+                    name_counts[base_name] += 1
+                    unique_name = f"{base_name} ({name_counts[base_name]})"
+                else:
+                    name_counts[base_name] = 1
+                    unique_name = base_name
+
+                # Add part to assembly with name
+                assembly.add(self.parts[i], name=unique_name)
+
+            # Name any remaining parts (debug markers) with generic names
+            for i in range(num_components, num_parts):
+                name = f"Debug Marker {i - num_components + 1}"
+                assembly.add(self.parts[i], name=name)
+        else:
+            # Fallback: no component metadata - use generic names
+            for i, part in enumerate(self.parts):
+                name = f'{self.nps}" Sch {self.schedule} Part {i + 1}'
+                assembly.add(part, name=name)
+
+        # Export the assembly to STEP file
+        # Use mode="fused" to preserve part names in the exported file
+        # Suppress FutureWarning about save() deprecation
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            assembly.save(filename, exportType="STEP")
 
 
 # =============================================================================
