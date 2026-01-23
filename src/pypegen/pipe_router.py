@@ -121,11 +121,70 @@ def parse_distance(distance_str: str) -> float:
 
 
 def normalize_direction(direction: str) -> tuple[float, float, float]:
-    """Get unit vector for a direction name."""
+    """
+    Get unit vector for a direction name.
+
+    Supports:
+    - Cardinal directions: "east", "west", "north", "south", "up", "down"
+    - Axis aliases: "+x", "-x", "+y", "-y", "+z", "-z"
+    - Compound directions: "east-down", "north-up", etc. (45° between the two)
+    - Angled compounds: "east-down@30" (30° from east toward down)
+
+    Examples:
+        normalize_direction("east") -> (1, 0, 0)
+        normalize_direction("east-down") -> (0.707, 0, -0.707)  # 45° between
+        normalize_direction("east-down@30") -> (0.866, 0, -0.5)  # 30° from east toward down
+    """
     direction = direction.strip().lower()
-    if direction not in DIRECTIONS:
-        raise ValueError(f"Unknown direction: {direction}. Use: {list(DIRECTIONS.keys())}")
-    return DIRECTIONS[direction]
+
+    # Check for simple cardinal direction first
+    if direction in DIRECTIONS:
+        return DIRECTIONS[direction]
+
+    # Check for compound direction with optional angle: "dir1-dir2" or "dir1-dir2@angle"
+    compound_match = re.match(r"([a-z+\-]+)-([a-z+\-]+)(?:@(\d+(?:\.\d+)?))?", direction)
+    if compound_match:
+        dir1_name = compound_match.group(1)
+        dir2_name = compound_match.group(2)
+        angle_str = compound_match.group(3)
+
+        if dir1_name not in DIRECTIONS:
+            raise ValueError(f"Unknown direction component: {dir1_name}")
+        if dir2_name not in DIRECTIONS:
+            raise ValueError(f"Unknown direction component: {dir2_name}")
+
+        dir1 = np.array(DIRECTIONS[dir1_name])
+        dir2 = np.array(DIRECTIONS[dir2_name])
+
+        # Check they're not parallel or anti-parallel
+        dot = np.dot(dir1, dir2)
+        if abs(dot) > 0.99:
+            raise ValueError(f"Directions {dir1_name} and {dir2_name} are parallel/anti-parallel")
+
+        # Default is 45° (equal blend), but can specify angle from dir1 toward dir2
+        if angle_str:
+            angle_deg = float(angle_str)
+        else:
+            angle_deg = 45.0
+
+        # Compute blended direction: rotate dir1 toward dir2 by angle_deg
+        angle_rad = math.radians(angle_deg)
+
+        # Use Rodrigues' rotation formula to rotate dir1 toward dir2
+        # First, find the axis of rotation (perpendicular to both)
+        axis = np.cross(dir1, dir2)
+        axis = axis / np.linalg.norm(axis)
+
+        # Rotate dir1 around axis by angle_rad
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        result = dir1 * cos_a + np.cross(axis, dir1) * sin_a + axis * np.dot(axis, dir1) * (1 - cos_a)
+
+        # Normalize
+        result = result / np.linalg.norm(result)
+        return (float(result[0]), float(result[1]), float(result[2]))
+
+    raise ValueError(f"Unknown direction: {direction}. Use: {list(DIRECTIONS.keys())} or compound like 'east-down'")
 
 
 def rotation_to_align_z_with_direction(target: tuple[float, float, float]) -> np.ndarray:

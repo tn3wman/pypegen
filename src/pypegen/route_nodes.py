@@ -184,11 +184,22 @@ class ElbowNode(RouteNode):
 
     Outlets:
         - "outlet": Connection point after the turn
+
+    The roll parameter allows rotating the elbow around its inlet axis.
+    This is useful for rolling offsets and non-planar pipe runs.
+    Roll is specified in degrees, with positive values rotating
+    counter-clockwise when looking along the incoming pipe direction.
+
+    The auto_unroll parameter, when True, automatically computes the roll
+    needed to achieve the specified turn_direction as a true global cardinal
+    direction. This compensates for any accumulated roll from previous elbows.
     """
 
     weld_type: WeldType = "sw"
-    turn_direction: str = "up"  # World direction after the elbow
+    turn_direction: str = "up"  # World direction after the elbow (before roll)
     angle: Literal[90, 45] = 90  # Elbow angle in degrees
+    roll: float = 0.0  # Roll angle in degrees around the inlet axis
+    auto_unroll: bool = False  # If True, auto-compute roll to achieve global turn direction
 
     def get_outlet_ports(self) -> list[str]:
         return ["outlet"]

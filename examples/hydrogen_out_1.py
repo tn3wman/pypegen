@@ -3,6 +3,7 @@
 Export the nested_tee_example to SVG and PDF.
 """
 
+import math
 from pathlib import Path
 
 import cadquery as cq
@@ -14,42 +15,69 @@ from pypegen.route_builder import RouteBuilder
 def nested_tee_example():
     """Route with nested tees (3+ levels deep)."""
     builder = RouteBuilder(
-        nps="1-1/2",
+        nps="2",
         schedule="40",
         flange_class=300,
         material="316 Stainless Steel",
     )
 
-    builder.start_with_flange("east", bolt_hole_orientation="two_hole")
-    p_1 = 12 + 2.375/2 + 4
+    builder.start_with_flange("east-up", bolt_hole_orientation="two_hole")
+    builder.add_pipe("12 in")
+    builder.add_elbow("east", "bw", angle=45)
+
+    p_1 = 60 - 5.650974999 + 3.5875
     builder.add_pipe(f"{p_1} in")
-    builder.add_reducer("2")
-    builder.add_elbow("up", "bw")
-    p_2 = 13.6875 + 10 + 2.375/2 + 4
-    builder.add_pipe(f"{p_2} in")
-    builder.add_elbow("west", "bw")
-    pl1 = 25.274914359 + 1.919087087 + 62.72161206 - 7.802424530 - 2.375/2 - 4
-    builder.add_pipe(f"{pl1} in")
-    builder.add_elbow("up", "bw")
-    p_4 = 100 + 16.555499700
+    builder.add_elbow("down", "bw")
+    p_2 = 37.336463430
+    # builder.add_pipe(f"{p_2} in")
+
+    p_3 = 153.891963130
+    builder.add_pipe(f"{p_3} in")
+    builder.add_elbow("east", "bw")
+
+    p_4 = 76.925688976 - 0.792500000 - 1.855000001 + 4 - 3.5875
     builder.add_pipe(f"{p_4} in")
 
-    with builder.add_tee("north", "sw") as tee1:
-        run = tee1.run()
-        branch = tee1.branch()
-        p_5 = 36
-        run.add_pipe(f"{p_5} in")
+    x = 48.882
+    y = 1.125
+    angle = math.atan2(y, x) * (180 / math.pi)
+    builder.add_elbow("down", "bw", roll=-angle)
+    p_5 = math.sqrt(x**2 + y**2)
+    builder.add_pipe(f"{p_5} in")
+    builder.add_elbow("west", "bw")
+    builder.add_reducer("1-1/2")
+    p_6 = 16 + 1.375492126 - 0.125 + 1.477499999 - 0.125
+    builder.add_pipe(f"{p_6} in")
+    builder.add_flange(bolt_hole_orientation="two_hole")
+    # p_1 = 12 + 2.375/2 + 4
+    # builder.add_pipe(f"{p_1} in")
+    # builder.add_reducer("2")
+    # builder.add_elbow("up", "bw")
+    # p_2 = 13.6875 + 10 + 2.375/2 + 4
+    # builder.add_pipe(f"{p_2} in")
+    # builder.add_elbow("west", "bw")
+    # pl1 = 25.274914359 + 1.919087087 + 62.72161206 - 7.802424530 - 2.375/2 - 4
+    # builder.add_pipe(f"{pl1} in")
+    # builder.add_elbow("up", "bw")
+    # p_4 = 100 + 16.555499700
+    # builder.add_pipe(f"{p_4} in")
 
-        run.add_elbow("west", "bw")
-        p_6 = 63.5 - 3.982335114 - 1.916 - 2.483 + 1.6969416 - 1.380 + 0.249881944
+    # with builder.add_tee("north", "sw") as tee1:
+    #     run = tee1.run()
+    #     branch = tee1.branch()
+    #     p_5 = 36
+    #     run.add_pipe(f"{p_5} in")
 
-        run.add_pipe(f"{p_6} in")
-        run.add_elbow("down", "bw", angle=45)
+    #     run.add_elbow("west", "bw")
+    #     p_6 = 63.5 - 3.982335114 - 1.916 - 2.483 + 1.6969416 - 1.380 + 0.249881944
 
-        p_7 = 24
-        run.add_pipe(f"{p_7} in")
-        run.add_elbow("down", "bw", angle=45)
-        run.add_pipe("30 in")
+    #     run.add_pipe(f"{p_6} in")
+    #     run.add_elbow("down", "bw", angle=45)
+
+    #     p_7 = 24
+    #     run.add_pipe(f"{p_7} in")
+    #     run.add_elbow("down", "bw", angle=45)
+    #     run.add_pipe("30 in")
     # builder.add_elbow("down", "bw")
     # pl = 12.254986620+2.049069382
     # builder.add_pipe(f"{pl} in")

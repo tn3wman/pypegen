@@ -3,6 +3,7 @@
 Export the nested_tee_example to SVG and PDF.
 """
 
+import math
 from pathlib import Path
 
 import cadquery as cq
@@ -14,27 +15,48 @@ from pypegen.route_builder import RouteBuilder
 def nested_tee_example():
     """Route with nested tees (3+ levels deep)."""
     builder = RouteBuilder(
-        nps="1-1/4",
+        nps="2-1/2",
         schedule="40",
         flange_class=300,
         material="316 Stainless Steel",
     )
 
     builder.start_with_flange("east", bolt_hole_orientation="two_hole")
-    builder.add_pipe("12 in")
     builder.add_reducer("2")
-    builder.add_elbow("up", "bw", roll=-4.72379102)
-    builder.add_pipe("13.6875 in")
-    builder.add_elbow("west", "bw")
-    pl1 = 25.274914359 + 1.919087087 + 62.72161206 - 7.530495396 - 4.126929134
-    builder.add_pipe(f"{pl1} in")
-    builder.add_elbow("up", "bw")
-    p_3 = 100 + 21.742999700
-    builder.add_pipe(f"{p_3} in")
-    builder.add_elbow("west", "bw")
-    builder.add_reducer("2-1/2")
-    builder.add_flange(bolt_hole_orientation="two_hole")
+    builder.add_pipe("10 in")
+    builder.add_elbow("down", "bw")
+
+    p_1 = 10
+    builder.add_pipe(f"{p_1} in")
+
+    with builder.add_tee("north", "sw") as tee1:
+        run = tee1.run()
+        branch = tee1.branch()
+
+        p_2 = 121.742999700 - p_1
+        run.add_pipe(f"{p_2} in")
+        run.add_elbow("east", "bw")
+
+        p_3 = 78.258188976 - 0.792500000 + 4 - 10 + 2.937992126 + 0.125
+        run.add_pipe(f"{p_3} in")
+
+        x = 33.694500300
+        y = 1.125000000
+        angle = math.atan2(y, x) * (180 / math.pi)
+        run.add_elbow("down", "bw", roll=-angle)
+
+        p_4 = math.sqrt(x**2 + y**2)
+        run.add_pipe(f"{p_4} in")
+        run.add_elbow("west", "bw")
+        run.add_reducer("1-1/2")
+        p_5 = 16 + 1.375492126 - 0.125 - 5.855000000 + 3.332500000 - 0.125
+        run.add_pipe(f"{p_5} in")
+        run.add_flange(bolt_hole_orientation="two_hole")
+    # builder.add_pipe("100 in")
+    # builder.add_elbow("east", "bw")
     # builder.add_pipe("63.5 in")
+    # builder.add_elbow("down", "bw", angle=45)
+    # builder.add_pipe("12.254986620 in")
     # builder.add_elbow("down", "bw")
     # pl = 12.254986620+2.049069382
     # builder.add_pipe(f"{pl} in")
@@ -52,7 +74,7 @@ def main():
 
     print("Building nested tee example...")
     route = nested_tee_example()
-    route.export(str(step_output / "ammonia_out.step"))
+    route.export(str(step_output / "hydrogen_out_3.step"))
 
     print(f"  Parts: {len(route.parts)}")
     print(f"  Components: {len(route.components)}")
@@ -69,10 +91,10 @@ def main():
     # Create fabrication drawing
     drawing = PipingDrawing(
         shape=combined_shape,
-        title='Ammonia Outlet Piping',
+        title='Hydrogen Outlet Piping',
         drawing_number="####",
         revision="0",
-        description='Ammonia Outlet Piping to MFCs',
+        description='Hydrogen Outlet Piping to MFCs',
         material="316 Stainless Steel",
         project_number="W803",
         drawn_by="T. Newman",
@@ -89,8 +111,8 @@ def main():
     drawing.generate()
 
     # Export SVG and PDF
-    svg_path = output_dir / "ammonia_out.svg"
-    pdf_path = output_dir / "ammonia_out.pdf"
+    svg_path = output_dir / "hydrogen_out_3.svg"
+    pdf_path = output_dir / "hydrogen_out_3.pdf"
 
     drawing.export_svg(str(svg_path))
     drawing.export_pdf(str(pdf_path))

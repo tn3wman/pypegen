@@ -3,6 +3,7 @@
 Export the nested_tee_example to SVG and PDF.
 """
 
+import math
 from pathlib import Path
 
 import cadquery as cq
@@ -14,27 +15,54 @@ from pypegen.route_builder import RouteBuilder
 def nested_tee_example():
     """Route with nested tees (3+ levels deep)."""
     builder = RouteBuilder(
-        nps="1-1/4",
+        nps="2",
         schedule="40",
         flange_class=300,
         material="316 Stainless Steel",
     )
 
-    builder.start_with_flange("east", bolt_hole_orientation="two_hole")
+    builder.start_with_flange("east-up", bolt_hole_orientation="two_hole")
     builder.add_pipe("12 in")
-    builder.add_reducer("2")
-    builder.add_elbow("up", "bw", roll=-4.72379102)
-    builder.add_pipe("13.6875 in")
-    builder.add_elbow("west", "bw")
-    pl1 = 25.274914359 + 1.919087087 + 62.72161206 - 7.530495396 - 4.126929134
-    builder.add_pipe(f"{pl1} in")
-    builder.add_elbow("up", "bw")
-    p_3 = 100 + 21.742999700
+    builder.add_elbow("east", "bw", angle=45)
+
+    p_1 = 60 - 5.650974999 + 3.5875
+    builder.add_pipe(f"{p_1} in")
+    builder.add_elbow("down", "bw")
+
+    p_2 = 153.891963130
+    builder.add_pipe(f"{p_2} in")
+    builder.add_elbow("east", "bw")
+    
+    p_3 = 64.215196850 + 6.062992126 -3.5875
     builder.add_pipe(f"{p_3} in")
+
+    x = 18.882000000
+    y = 18.125000000
+    angle = math.atan2(y, x) * (180 / math.pi)
+    builder.add_elbow("down", "bw", roll=-angle)
+    p_4 = math.sqrt(x**2 + y**2)
+    builder.add_pipe(f"{p_4} in")
+
     builder.add_elbow("west", "bw")
-    builder.add_reducer("2-1/2")
+    builder.add_reducer("1-1/4")
+    p_5 = 16 + 1.375492126 - 0.125 - 5.855000000 - 0.125
+    builder.add_pipe(f"{p_5} in")
     builder.add_flange(bolt_hole_orientation="two_hole")
+    # p_1 = 12 + 2.375/2 + 4
+    # builder.add_pipe(f"{p_1} in")
+    # builder.add_reducer("2")
+    # builder.add_elbow("up", "bw")
+    # p_2 = 13.6875 + 10 + 2.375/2 + 4
+    # builder.add_pipe(f"{p_2} in")
+    # builder.add_elbow("west", "bw")
+    # pl1 = 25.274914359 + 1.919087087 + 62.72161206 - 7.802424530 - 2.375/2 - 4
+    # builder.add_pipe(f"{pl1} in")
+    # builder.add_elbow("up", "bw")
+    # builder.add_pipe("100 in")
+    # builder.add_elbow("west", "bw")
     # builder.add_pipe("63.5 in")
+    # builder.add_elbow("down", "bw", angle=45)
+    # builder.add_pipe("12.254986620 in")
     # builder.add_elbow("down", "bw")
     # pl = 12.254986620+2.049069382
     # builder.add_pipe(f"{pl} in")

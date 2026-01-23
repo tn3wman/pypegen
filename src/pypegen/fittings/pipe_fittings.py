@@ -283,6 +283,8 @@ def compute_initial_up_vector(direction: tuple[float, float, float]) -> tuple[fl
 
     For horizontal pipes, "up" is world +Z.
     For vertical pipes, we choose a default horizontal "up".
+    For angled pipes, we compute an up-vector that's perpendicular to the
+    direction and as close to world +Z as possible (or +Y for near-vertical).
 
     Args:
         direction: Direction the pipe travels (unit vector)
@@ -290,15 +292,45 @@ def compute_initial_up_vector(direction: tuple[float, float, float]) -> tuple[fl
     Returns:
         Up-vector perpendicular to direction
     """
-    dx, dy, dz = direction
+    import numpy as np
 
-    # Check if direction is vertical (up or down)
+    d = np.array(direction)
+    d = d / np.linalg.norm(d)  # Ensure normalized
+
+    dx, dy, dz = d
+
+    # Check if direction is mostly vertical (up or down)
     if abs(dz) > 0.99:
-        # Pipe is vertical, use north (+Y) as "up" reference
+        # Pipe is nearly vertical, use north (+Y) as "up" reference
         return (0.0, 1.0, 0.0)
+    elif abs(dz) > 0.7:
+        # Pipe is significantly angled but not vertical
+        # Use world +Y as reference, then make perpendicular to direction
+        world_y = np.array([0.0, 1.0, 0.0])
+
+        # Gram-Schmidt: make world_y perpendicular to direction
+        up = world_y - np.dot(world_y, d) * d
+        up_norm = np.linalg.norm(up)
+        if up_norm > 1e-6:
+            up = up / up_norm
+            return (float(up[0]), float(up[1]), float(up[2]))
+        else:
+            # Fallback
+            return (0.0, 1.0, 0.0)
     else:
-        # Pipe is horizontal, use world +Z as "up"
-        return (0.0, 0.0, 1.0)
+        # Pipe is mostly horizontal (or moderately angled)
+        # Use world +Z as reference, then make perpendicular to direction
+        world_z = np.array([0.0, 0.0, 1.0])
+
+        # Gram-Schmidt: make world_z perpendicular to direction
+        up = world_z - np.dot(world_z, d) * d
+        up_norm = np.linalg.norm(up)
+        if up_norm > 1e-6:
+            up = up / up_norm
+            return (float(up[0]), float(up[1]), float(up[2]))
+        else:
+            # Fallback (shouldn't happen for non-vertical directions)
+            return (0.0, 0.0, 1.0)
 
 
 def compute_up_vector_after_elbow(incoming_direction: tuple[float, float, float], outgoing_direction: tuple[float, float, float], current_up: tuple[float, float, float]) -> tuple[float, float, float]:

@@ -96,6 +96,50 @@ except ImportError:
 # =============================================================================
 
 
+def compute_90_degree_turn_direction(
+    incoming_direction: tuple[float, float, float],
+    turn_plane_direction: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Compute the actual output direction after a 90° turn.
+
+    For a 90° elbow, the output direction is perpendicular to the incoming
+    direction and lies in the plane defined by incoming and turn_plane directions.
+
+    When the incoming direction is a cardinal direction and turn_plane is
+    perpendicular to it, the output equals turn_plane. However, when incoming
+    is non-cardinal (e.g., after a 45° elbow), the output is computed as the
+    component of turn_plane that's perpendicular to incoming.
+
+    Args:
+        incoming_direction: Direction pipe was traveling before the elbow
+        turn_plane_direction: Cardinal direction specifying the turn plane
+
+    Returns:
+        Unit vector of the actual output direction (90° from incoming)
+    """
+    inc = np.array(incoming_direction)
+    turn = np.array(turn_plane_direction)
+
+    # Normalize inputs
+    inc = inc / np.linalg.norm(inc)
+    turn = turn / np.linalg.norm(turn)
+
+    # Find the component of turn that's perpendicular to incoming
+    # For a 90° elbow, this perpendicular component IS the output direction
+    turn_parallel = np.dot(turn, inc) * inc
+    turn_perp = turn - turn_parallel
+
+    if np.linalg.norm(turn_perp) < 1e-6:
+        # turn is parallel to incoming - can't turn in that direction
+        # This shouldn't happen for valid elbow configurations
+        return tuple(incoming_direction)
+
+    turn_perp = turn_perp / np.linalg.norm(turn_perp)
+
+    return (float(turn_perp[0]), float(turn_perp[1]), float(turn_perp[2]))
+
+
 def compute_45_degree_turn_direction(
     incoming_direction: tuple[float, float, float],
     turn_plane_direction: tuple[float, float, float],
@@ -144,6 +188,164 @@ def compute_45_degree_turn_direction(
     out_45 = math.cos(angle) * inc + math.sin(angle) * turn_perp
 
     return (float(out_45[0]), float(out_45[1]), float(out_45[2]))
+
+
+def apply_roll_to_direction(
+    direction: tuple[float, float, float],
+    axis: tuple[float, float, float],
+    roll_degrees: float,
+) -> tuple[float, float, float]:
+    """
+    Rotate a direction vector around an axis by the specified angle.
+
+    This is used to apply roll to an elbow's turn direction, rotating
+    the outlet direction around the inlet axis.
+
+    Args:
+        direction: The direction vector to rotate
+        axis: The axis to rotate around (typically the incoming pipe direction)
+        roll_degrees: Rotation angle in degrees. Positive = counter-clockwise
+                      when looking along the axis direction (toward the elbow).
+
+    Returns:
+        The rotated direction as a unit vector
+    """
+    import math
+
+    if abs(roll_degrees) < 1e-6:
+        return direction
+
+    # Rodrigues' rotation formula
+    # Negate angle to get counter-clockwise when looking along axis
+    # (right-hand rule gives clockwise, we want counter-clockwise for intuitive use)
+    d = np.array(direction)
+    k = np.array(axis)
+
+    # Normalize
+    d = d / np.linalg.norm(d)
+    k = k / np.linalg.norm(k)
+
+    theta = math.radians(-roll_degrees)  # Negate for CCW convention
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+
+    # Rodrigues' formula: v_rot = v*cos(θ) + (k×v)*sin(θ) + k*(k·v)*(1-cos(θ))
+    d_rot = d * cos_t + np.cross(k, d) * sin_t + k * np.dot(k, d) * (1 - cos_t)
+
+    return (float(d_rot[0]), float(d_rot[1]), float(d_rot[2]))
+
+
+def compute_unroll_angle(
+    incoming_direction: tuple[float, float, float],
+    target_turn_direction: tuple[float, float, float],
+    current_up: tuple[float, float, float],
+) -> float:
+    """
+    Compute the roll angle needed to achieve a global cardinal turn direction.
+
+    When a previous elbow has been rolled, the local coordinate frame (tracked via
+    the up_vector) is rotated. To achieve a turn toward a global cardinal direction,
+    we need to compute the roll that aligns the local frame with the global frame
+    for the desired turn plane.
+
+    The math:
+    - For an elbow turning from `incoming_direction` toward `target_turn_direction`,
+      the turn plane is defined by these two vectors.
+    - The "natural" or "unrolled" turn direction is perpendicular to both the
+      incoming direction and the current up vector.
+    - The roll angle is the angle between this natural turn direction and the
+      target turn direction, measured around the incoming axis.
+
+    Args:
+        incoming_direction: Direction the pipe is currently traveling
+        target_turn_direction: The desired global cardinal direction for the turn
+        current_up: The current up-vector (may be rotated from global up)
+
+    Returns:
+        Roll angle in degrees needed to achieve the target direction.
+        Positive = counter-clockwise when looking along incoming direction.
+    """
+    import math
+
+    inc = np.array(incoming_direction)
+    target = np.array(target_turn_direction)
+    up = np.array(current_up)
+
+    # Normalize
+    inc = inc / np.linalg.norm(inc)
+    target = target / np.linalg.norm(target)
+    up = up / np.linalg.norm(up)
+
+    # The "natural" turn direction is perpendicular to both incoming and up
+    # This is where the elbow would turn with roll=0 in the local frame
+    # For the perpendicular calculation, we need the direction that's in the plane
+    # perpendicular to incoming that corresponds to the local horizontal
+
+    # Local "right" direction (perpendicular to both incoming and up)
+    local_right = np.cross(inc, up)
+    local_right_norm = np.linalg.norm(local_right)
+    if local_right_norm < 1e-6:
+        # Incoming is parallel to up, can't determine reference frame
+        return 0.0
+    local_right = local_right / local_right_norm
+
+    # Project target onto the plane perpendicular to incoming
+    target_parallel = np.dot(target, inc) * inc
+    target_perp = target - target_parallel
+    target_perp_norm = np.linalg.norm(target_perp)
+
+    if target_perp_norm < 1e-6:
+        # Target is parallel to incoming, can't turn that way
+        return 0.0
+    target_perp = target_perp / target_perp_norm
+
+    # The roll angle is the angle from `up` (projected) to `target_perp`
+    # measured around the incoming axis
+
+    # Project up onto the plane perpendicular to incoming (should already be perpendicular
+    # if up is orthogonal to incoming, but let's be safe)
+    up_parallel = np.dot(up, inc) * inc
+    up_perp = up - up_parallel
+    up_perp_norm = np.linalg.norm(up_perp)
+    if up_perp_norm < 1e-6:
+        up_perp = local_right  # Fallback
+    else:
+        up_perp = up_perp / up_perp_norm
+
+    # Compute angle between up_perp and target_perp
+    dot = np.clip(np.dot(up_perp, target_perp), -1.0, 1.0)
+    angle_rad = math.acos(dot)
+
+    # Determine sign: is target_perp clockwise or counter-clockwise from up_perp?
+    # Cross product with incoming axis gives the sign
+    cross = np.cross(up_perp, target_perp)
+    if np.dot(cross, inc) < 0:
+        angle_rad = -angle_rad
+
+    # The roll needed is 90° minus this angle (since up points to the "12 o'clock"
+    # position and the natural horizontal turn is at "3 o'clock")
+    # Actually, let's think more carefully:
+    # - With roll=0, if up points to +Z and we're going +X, turning "up" means +Z
+    # - The target direction is what we want the elbow to turn toward
+    # - The angle we computed is from current up to target
+    # - For a horizontal turn (left/right), target is perpendicular to up
+    # - For a vertical turn (up/down), target is parallel/anti-parallel to up
+
+    # Simpler approach: compute angle from local_right to target_perp
+    # This gives us the roll from the "natural right" position
+    dot_right = np.clip(np.dot(local_right, target_perp), -1.0, 1.0)
+    angle_from_right = math.acos(dot_right)
+
+    # Determine sign using cross product
+    cross_right = np.cross(local_right, target_perp)
+    if np.dot(cross_right, inc) < 0:
+        angle_from_right = -angle_from_right
+
+    # Convert to degrees and negate to match the roll convention
+    # (positive roll = CCW when looking along incoming)
+    roll_degrees = -math.degrees(angle_from_right)
+
+    return roll_degrees
 
 
 def direction_name_to_vector(name: str) -> tuple[float, float, float]:
@@ -682,12 +884,27 @@ class RouteGeometryBuilder:
         incoming_direction: tuple[float, float, float],
         up_vector: tuple[float, float, float],
     ) -> dict[str, tuple[np.ndarray, tuple[float, float, float], tuple[float, float, float]]]:
-        """Build an elbow fitting (90° or 45°)."""
+        """Build an elbow fitting (90° or 45°), with optional roll."""
         # The turn_direction from the node is the cardinal direction of the turn plane
-        # For 90° elbows, this IS the output direction
-        # For 45° elbows, the output direction is 45° between incoming and turn_direction
+        # The actual output direction depends on the elbow angle AND the incoming direction
         turn_plane_direction = direction_name_to_vector(node.turn_direction)
         elbow_angle = node.angle  # 90 or 45
+        roll_angle = node.roll  # Roll in degrees around inlet axis
+
+        # If auto_unroll is enabled, compute the roll needed to achieve the global
+        # cardinal direction specified by turn_direction
+        if node.auto_unroll:
+            unroll_angle = compute_unroll_angle(
+                incoming_direction, turn_plane_direction, up_vector
+            )
+            roll_angle = roll_angle + unroll_angle
+
+        # Apply roll to the turn plane direction if specified
+        # Roll rotates around the incoming direction axis
+        if abs(roll_angle) > 1e-6:
+            turn_plane_direction = apply_roll_to_direction(
+                turn_plane_direction, incoming_direction, roll_angle
+            )
 
         if elbow_angle == 45:
             # Compute actual 45° output direction
@@ -695,8 +912,13 @@ class RouteGeometryBuilder:
                 incoming_direction, turn_plane_direction
             )
         else:
-            # 90° elbow: output direction is the turn plane direction
-            actual_turn_direction = turn_plane_direction
+            # 90° elbow: compute actual output direction based on geometry
+            # When incoming is cardinal and perpendicular to turn_plane, this equals turn_plane
+            # When incoming is non-cardinal (e.g., after a 45° elbow), this is the
+            # perpendicular component of turn_plane with respect to incoming
+            actual_turn_direction = compute_90_degree_turn_direction(
+                incoming_direction, turn_plane_direction
+            )
 
         # Create elbow based on weld type and angle
         if node.weld_type == "bw":

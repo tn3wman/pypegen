@@ -190,6 +190,8 @@ class BranchBuilder:
         weld_type: WeldType = "sw",
         name: str | None = None,
         angle: Literal[90, 45] = 90,
+        roll: float = 0.0,
+        auto_unroll: bool = False,
     ) -> BranchBuilder:
         """
         Add an elbow turning toward the specified direction.
@@ -199,9 +201,26 @@ class BranchBuilder:
             weld_type: "sw" for socket weld, "bw" for butt weld
             name: Optional name for this elbow
             angle: Elbow angle - 90 for standard elbow, 45 for 45-degree elbow
+            roll: Roll angle in degrees around the inlet axis. Positive values
+                  rotate the outlet counter-clockwise when looking along the
+                  incoming pipe direction. Use this for rolling offsets.
+            auto_unroll: If True, automatically compute the roll needed to
+                  achieve `turn_to` as a true global cardinal direction,
+                  compensating for any accumulated roll from previous elbows.
+                  The `roll` parameter is added on top of the auto-computed roll.
 
         Returns:
             Self for method chaining
+
+        Example:
+            # Standard elbow turning up
+            builder.add_elbow("up", "bw")
+
+            # Elbow with 30° roll for a rolling offset
+            builder.add_elbow("up", "bw", roll=30)
+
+            # After a rolled elbow, auto-unroll to go true west
+            builder.add_elbow("west", "bw", auto_unroll=True)
         """
         if self._terminated:
             raise RuntimeError("Cannot add to a terminated branch")
@@ -211,6 +230,8 @@ class BranchBuilder:
             turn_direction=turn_to,
             name=name,
             angle=angle,
+            roll=roll,
+            auto_unroll=auto_unroll,
         )
         self._current_node.add_child(self._current_port, node)
         self._current_node = node
@@ -817,6 +838,8 @@ class RouteBuilder:
         weld_type: WeldType = "sw",
         name: str | None = None,
         angle: Literal[90, 45] = 90,
+        roll: float = 0.0,
+        auto_unroll: bool = False,
     ) -> RouteBuilder:
         """
         Add an elbow turning toward the specified direction.
@@ -826,9 +849,26 @@ class RouteBuilder:
             weld_type: "sw" for socket weld, "bw" for butt weld
             name: Optional name for this elbow
             angle: Elbow angle - 90 for standard elbow, 45 for 45-degree elbow
+            roll: Roll angle in degrees around the inlet axis. Positive values
+                  rotate the outlet counter-clockwise when looking along the
+                  incoming pipe direction. Use this for rolling offsets.
+            auto_unroll: If True, automatically compute the roll needed to
+                  achieve `turn_to` as a true global cardinal direction,
+                  compensating for any accumulated roll from previous elbows.
+                  The `roll` parameter is added on top of the auto-computed roll.
 
         Returns:
             Self for method chaining
+
+        Example:
+            # Standard elbow turning up
+            builder.add_elbow("up", "bw")
+
+            # Elbow with 30° roll for a rolling offset
+            builder.add_elbow("up", "bw", roll=30)
+
+            # After a rolled elbow, auto-unroll to go true west
+            builder.add_elbow("west", "bw", auto_unroll=True)
         """
         self._ensure_started()
         assert self._current_node is not None and self._current_port is not None
@@ -838,6 +878,8 @@ class RouteBuilder:
             turn_direction=turn_to,
             name=name,
             angle=angle,
+            roll=roll,
+            auto_unroll=auto_unroll,
         )
         self._current_node.add_child(self._current_port, node)
         self._current_node = node
