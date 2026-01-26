@@ -1922,7 +1922,8 @@ class BOMTable:
         entries: list[BOMEntry],
         area: ViewArea,
         row_height: float = BOM_ROW_HEIGHT,
-        header_height: float = BOM_HEADER_HEIGHT
+        header_height: float = BOM_HEADER_HEIGHT,
+        show_notes: bool = True,
     ):
         """
         Initialize the BOM table.
@@ -1932,11 +1933,13 @@ class BOMTable:
             area: ViewArea defining the available space (y is baseline)
             row_height: Height of each data row
             header_height: Height of the header row
+            show_notes: Whether to include notes section below the table
         """
         self.entries = entries
         self.area = area
         self.row_height = row_height
         self.header_height = header_height
+        self.show_notes = show_notes
 
         # Column configuration (widths as proportions) - tighter spacing
         # Columns: ITEM, QTY, SIZE, SCH/CLS, LENGTH, DESCRIPTION, MATERIAL
@@ -1986,33 +1989,34 @@ class BOMTable:
         )
 
         # Notes section below the table (in title block area) with bold border
-        from .constants import BORDER_WIDTH, TITLE_BLOCK_HEIGHT
-        notes_height = TITLE_BLOCK_HEIGHT
-        notes_y = baseline_y
+        if self.show_notes:
+            from .constants import BORDER_WIDTH, TITLE_BLOCK_HEIGHT
+            notes_height = TITLE_BLOCK_HEIGHT
+            notes_y = baseline_y
 
-        # Bold border around notes (same as title block)
-        svg_parts.append(
-            f'<rect x="{x}" y="{notes_y}" width="{w}" height="{notes_height}" '
-            f'fill="none" stroke="{BORDER_COLOR}" stroke-width="{BORDER_WIDTH * 2}"/>'
-        )
+            # Bold border around notes (same as title block)
+            svg_parts.append(
+                f'<rect x="{x}" y="{notes_y}" width="{w}" height="{notes_height}" '
+                f'fill="none" stroke="{BORDER_COLOR}" stroke-width="{BORDER_WIDTH * 2}"/>'
+            )
 
-        # Notes text
-        svg_parts.append(
-            f'<text x="{x + 3}" y="{notes_y + 10}" '
-            f'font-family="Arial" font-size="2" font-weight="bold">NOTES:</text>'
-        )
-        svg_parts.append(
-            f'<text x="{x + 3}" y="{notes_y + 17}" '
-            f'font-family="Arial" font-size="1.8">1. ALL DIMS IN MM</text>'
-        )
-        svg_parts.append(
-            f'<text x="{x + 3}" y="{notes_y + 24}" '
-            f'font-family="Arial" font-size="1.8">2. WELD PER SPEC</text>'
-        )
-        svg_parts.append(
-            f'<text x="{x + 3}" y="{notes_y + 31}" '
-            f'font-family="Arial" font-size="1.8">3. AWS SYMBOLS</text>'
-        )
+            # Notes text
+            svg_parts.append(
+                f'<text x="{x + 3}" y="{notes_y + 10}" '
+                f'font-family="Arial" font-size="2" font-weight="bold">NOTES:</text>'
+            )
+            svg_parts.append(
+                f'<text x="{x + 3}" y="{notes_y + 17}" '
+                f'font-family="Arial" font-size="1.8">1. ALL DIMS IN MM</text>'
+            )
+            svg_parts.append(
+                f'<text x="{x + 3}" y="{notes_y + 24}" '
+                f'font-family="Arial" font-size="1.8">2. WELD PER SPEC</text>'
+            )
+            svg_parts.append(
+                f'<text x="{x + 3}" y="{notes_y + 31}" '
+                f'font-family="Arial" font-size="1.8">3. AWS SYMBOLS</text>'
+            )
 
         svg_parts.append('</g>')
         return '\n'.join(svg_parts)

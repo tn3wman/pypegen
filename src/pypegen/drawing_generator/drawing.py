@@ -1771,3 +1771,432 @@ class PipingDrawing:
 
 # Alias for backward compatibility
 EngineeringDrawing = PipingDrawing
+
+
+# =============================================================================
+# ORTHOGRAPHIC PIPING DRAWING (3rd Angle Projection)
+# =============================================================================
+
+from .view_projection import ViewProjection, create_standard_views
+from .layout_engine import ViewLayoutEngine
+from .page import DrawingPage, MultiPageDrawing
+
+
+@dataclass
+class OrthographicPipingDrawing:
+    """
+    Generates a multi-view orthographic piping fabrication drawing.
+
+    Uses 3rd angle projection with Front, Top, Right Side, and Isometric views.
+    BOM is placed on a separate page.
+
+    Attributes:
+        shape: CadQuery shape to render (either this or step_file required)
+        step_file: Path to STEP file to load
+        title: Drawing title
+        drawing_number: Drawing number/identifier
+        revision: Revision number
+        scale_text: Scale indicator text
+        material: Material specification (for BOM)
+        components: List of ComponentRecord for BOM generation
+        welds: List of WeldRecord for weld markers
+        show_hidden: Whether to show hidden lines
+        show_balloons: Whether to show balloon leaders
+        show_welds: Whether to show weld markers
+    """
+
+    shape: cq.Shape | None = None
+    step_file: str | None = None
+    title: str = "PIPING ASSEMBLY"
+    drawing_number: str = "SPOOL-001"
+    revision: str = "0"
+    scale_text: str = "NOT TO SCALE"
+    description: str = ""
+    material: str = ""
+    project_number: str = ""
+    fund_number: str = ""
+    drawn_by: str = ""
+    drawn_date: str = ""
+    checked_by: str = ""
+    checked_date: str = ""
+    company_name: str = ""
+    company_logo_path: str | None = None
+    show_hidden: bool = True
+    components: list[ComponentRecord] = field(default_factory=list)
+    welds: list[WeldRecord] = field(default_factory=list)
+    show_balloons: bool = True
+    show_welds: bool = True
+    primary_annotation_view: str = "front"  # View for balloons
+
+    # Internal state
+    _views: dict[str, ViewProjection] = field(default_factory=dict, repr=False)
+    _multi_page: MultiPageDrawing = field(init=False, repr=False)
+    _layout_engine: ViewLayoutEngine = field(init=False, repr=False)
+
+    def __post_init__(self):
+        """Initialize shape and layout."""
+        # Load shape from STEP file if provided
+        if self.shape is None and self.step_file:
+            self.shape = load_step_file(self.step_file)
+        elif self.shape is None:
+            raise ValueError("Either shape or step_file must be provided")
+
+        # Compute 3D world positions for all components
+        for comp in self.components:
+            comp.set_world_position_from_shape()
+
+        # Initialize multi-page drawing
+        self._multi_page = MultiPageDrawing(
+            title=self.title,
+            drawing_number=self.drawing_number,
+        )
+
+    def _create_title_block(self, sheet_info: str = "") -> TitleBlock:
+        """Create a title block instance."""
+        return TitleBlock(
+            info=TitleBlockInfo(
+                title=self.title,
+                drawing_number=self.drawing_number,
+                revision=self.revision,
+                scale_text=self.scale_text,
+                description=self.description,
+                project_number=self.project_number,
+                fund_number=self.fund_number,
+                drawn_by=self.drawn_by,
+                drawn_date=self.drawn_date,
+                checked_by=self.checked_by,
+                checked_date=self.checked_date,
+                company_name=self.company_name,
+                company_logo_path=self.company_logo_path,
+            )
+        )
+
+    def _create_view_layout(self) -> None:
+        """Create the view layout using the layout engine."""
+        # Calculate drawing area (full sheet minus margins and title block)
+        title_block_height = 35
+        drawing_area = ViewArea(
+            x=DRAWING_AREA_X,
+            y=DRAWING_AREA_Y,
+            width=DRAWING_AREA_WIDTH,
+            height=SHEET_HEIGHT_MM - 2 * DRAWING_AREA_Y - title_block_height - 10,
+        )
+
+        # Create layout engine and compute views
+        self._layout_engine = ViewLayoutEngine(drawing_area)
+        self._views = self._layout_engine.create_layout(
+            self.shape,
+            self.components if self.components else None,
+        )
+
+        # Apply unified scale across all views
+        unified_scale = self._layout_engine.get_unified_scale()
+        self._layout_engine.apply_unified_scale(unified_scale)
+
+    def _render_single_view(self, view: ViewProjection) -> str:
+        """Render a single view with its border and label."""
+        if self.shape is None:
+            return ""
+
+        # Apply model rotation based on view type
+        # CadQuery's orthographic projection has axis conventions that need correction:
+        # - For front view (looking along Y): Z maps to SVG-X, X maps to SVG-Y (wrong!)
+        #   Fix: rotate -90 around Y so X->SVG-X, Z->SVG-Y (correct: East right, Up up)
+        # - For right view (looking along X): similar issue
+        #   Fix: rotate -90 around X so Y->SVG-X, Z->SVG-Y
+        # - For top view (looking along Z): X->SVG-X, Y->SVG-Y (correct, no rotation)
+        # - For isometric: uses legacy -90 X rotation for piping convention
+        shape_to_render = self.shape
+        if view.is_isometric and ROTATE_MODEL_FOR_PROJECTION:
+            # Isometric: rotate -90 around X to fix Y/Z swap for piping convention
+            shape_to_render = self.shape.rotate((0, 0, 0), (1, 0, 0), -90)
+        elif view.name == "front":
+            # Front view (Looking North): rotate +90° around Y
+            # CadQuery with projectionDir=(0,-1,0) baseline maps Z->geom_x, X->geom_y
+            # +90° Y rotation transforms this to: East->Right, Up->Up
+            shape_to_render = self.shape.rotate((0, 0, 0), (0, 1, 0), 90)
+        elif view.name == "right":
+            # Right view (Looking West): rotate +90° around X
+            # CadQuery with projectionDir=(1,0,0) and -Y scale in SVG transform
+            # +90° X rotation gives: North->Right, Up->Up
+            shape_to_render = self.shape.rotate((0, 0, 0), (1, 0, 0), 90)
+
+        # Generate raw SVG from CadQuery
+        raw_svg = view.render_geometry_svg(
+            shape_to_render,
+            width=800,
+            height=600,
+            show_hidden=self.show_hidden,
+        )
+
+        # Initialize view parameters from SVG
+        if not view._initialized:
+            view.set_from_rendered_svg(raw_svg, fit_margin=10.0)
+
+        # Parse the SVG to extract geometry
+        try:
+            root = ET.fromstring(raw_svg)
+        except ET.ParseError:
+            return f"<!-- Failed to parse SVG for {view.name} -->"
+
+        main_group = find_svg_geometry_group(root)
+        if main_group is None:
+            return f"<!-- No geometry found for {view.name} -->"
+
+        # Extract geometry content
+        geometry_parts = []
+        for child in main_group:
+            content = ET.tostring(child, encoding='unicode')
+            content = strip_svg_namespaces(content)
+            geometry_parts.append(content)
+        geometry = '\n'.join(geometry_parts)
+
+        # Build transform to position geometry in view area
+        view_cx, view_cy = view.view_area.center
+        geom_cx, geom_cy = view._geometry_center_x, view._geometry_center_y
+        fit_scale = view._fit_scale
+
+        # Transform sequence to center geometry in view and flip Y axis:
+        # 1. First translate moves geometry center to origin
+        # 2. Scale uniformly and flip Y (so positive geom Y becomes visual UP)
+        # 3. Final translate moves to view center
+        #
+        # With scale(s, -s), a point (x, y) transforms as:
+        #   After translate(-cx, -cy): (x-cx, y-cy)
+        #   After scale(s, -s): ((x-cx)*s, (y-cy)*(-s))
+        #   After translate(vx, vy): (vx + (x-cx)*s, vy - (y-cy)*s)
+        #
+        # For geometry center (cx, cy) to map to view center (vx, vy):
+        #   vx + 0 = vx ✓
+        #   vy - 0 = vy ✓
+        # This works correctly with -cy in the first translate.
+        transform = (
+            f"translate({view_cx}, {view_cy}) "
+            f"scale({fit_scale}, {-fit_scale}) "
+            f"translate({-geom_cx}, {-geom_cy})"
+        )
+
+        # Build SVG group for this view
+        svg_parts = [
+            f'<g id="{view.name}-view">',
+            f'  <!-- {view.label} -->',
+            view.generate_view_border_svg(),
+            f'  <g transform="{transform}">',
+            f'    {geometry}',
+            '  </g>',
+            view.generate_view_label_svg(),
+            '</g>',
+        ]
+
+        return '\n'.join(svg_parts)
+
+    def _create_views_page(self) -> DrawingPage:
+        """Create Page 1 with orthographic views and notes."""
+        page = DrawingPage(
+            page_number=1,
+            total_pages=2,
+            title_block=self._create_title_block("SHEET 1 OF 2"),
+            page_title="ORTHOGRAPHIC VIEWS",
+        )
+
+        # Add each view
+        for view_name in ["top", "isometric", "front", "right"]:
+            if view_name in self._views:
+                view = self._views[view_name]
+                view_svg = self._render_single_view(view)
+                page.add_element(view_svg)
+
+        # Add annotations to primary view (front)
+        if self.show_balloons and self.primary_annotation_view in self._views:
+            annotation_svg = self._create_view_annotations(
+                self._views[self.primary_annotation_view]
+            )
+            page.add_element(annotation_svg)
+
+        # Add notes section on page 1
+        notes_svg = self._create_notes_section()
+        page.add_element(notes_svg)
+
+        return page
+
+    def _create_view_annotations(self, view: ViewProjection) -> str:
+        """Create balloon annotations for a specific view."""
+        if not self.components:
+            return ""
+
+        # Create coordinate mapper for this view
+        coord_mapper = CoordinateMapper(
+            apply_model_rotation=view.is_isometric and ROTATE_MODEL_FOR_PROJECTION
+        )
+
+        # Set mapper parameters from view
+        coord_mapper._initialized = True
+        coord_mapper.cq_scale_x = view._cq_scale_x
+        coord_mapper.cq_scale_y = view._cq_scale_y
+        coord_mapper.cq_translate_x = view._cq_translate_x
+        coord_mapper.cq_translate_y = view._cq_translate_y
+        coord_mapper.geometry_center_x = view._geometry_center_x
+        coord_mapper.geometry_center_y = view._geometry_center_y
+        coord_mapper.fit_scale = view._fit_scale
+        coord_mapper.view_center_x = view.view_area.center_x
+        coord_mapper.view_center_y = view.view_area.center_y
+
+        # Compute SVG positions for components
+        for comp in self.components:
+            if comp.center_3d:
+                svg_pos = coord_mapper.world_to_svg(*comp.center_3d)
+                comp.svg_position_2d = svg_pos
+
+        # Create annotation context with view area
+        context = AnnotationPlacementContext(
+            view_area=view.view_area,
+            fit_scale=view._fit_scale,
+        )
+
+        # Place balloons using topology placer
+        placer = TopologyBalloonPlacer(context)
+
+        balloons = []
+        for comp in self.components:
+            if comp.svg_position_2d and comp.svg_bounds_2d:
+                balloon = placer.place_balloon_for_component(
+                    comp,
+                    comp.svg_position_2d,
+                    comp.svg_bounds_2d,
+                )
+                if balloon:
+                    balloons.append(balloon)
+
+        # Render balloons
+        if balloons:
+            return render_all_balloons_svg(balloons)
+        return ""
+
+    def _create_bom_page(self) -> DrawingPage:
+        """Create Page 2 with BOM and notes."""
+        page = DrawingPage(
+            page_number=2,
+            total_pages=2,
+            title_block=self._create_title_block("SHEET 2 OF 2"),
+            page_title="BILL OF MATERIALS",
+        )
+
+        # Aggregate components into BOM entries
+        if self.components:
+            bom_entries = aggregate_components_to_bom(
+                self.components,
+                material=self.material,
+            )
+
+            if bom_entries:
+                # Create full-width BOM table for this page (no notes - they're on page 1)
+                bom_area = ViewArea(
+                    x=DRAWING_AREA_X,
+                    y=DRAWING_AREA_Y + 20,  # Below page title
+                    width=DRAWING_AREA_WIDTH,
+                    height=0,  # Height computed by BOMTable
+                )
+
+                bom_table = BOMTable(entries=bom_entries, area=bom_area, show_notes=True)
+                page.add_element(bom_table.generate_svg())
+
+        return page
+
+    def _create_notes_section(self) -> str:
+        """Create notes section in the title block area (left side of title block).
+
+        This matches the layout used in the isometric drawing where notes
+        appear in a box to the left of the title block.
+        """
+        from .constants import BOM_X, BOM_WIDTH, BOM_Y, TITLE_BLOCK_HEIGHT, BORDER_WIDTH
+
+        notes_x = BOM_X
+        notes_y = BOM_Y  # Same baseline as title block top
+        notes_width = BOM_WIDTH
+        notes_height = TITLE_BLOCK_HEIGHT
+
+        svg_parts = ['<g id="notes">']
+
+        # Bold border around notes box (same style as title block)
+        svg_parts.append(
+            f'<rect x="{notes_x}" y="{notes_y}" width="{notes_width}" '
+            f'height="{notes_height}" fill="none" stroke="#000000" '
+            f'stroke-width="{BORDER_WIDTH * 2}"/>'
+        )
+
+        # Notes text (compact format to fit in title block area)
+        svg_parts.append(
+            f'<text x="{notes_x + 3}" y="{notes_y + 10}" '
+            f'font-family="Arial" font-size="2" font-weight="bold">NOTES:</text>'
+        )
+        svg_parts.append(
+            f'<text x="{notes_x + 3}" y="{notes_y + 17}" '
+            f'font-family="Arial" font-size="1.8">1. ALL DIMS IN MM</text>'
+        )
+        svg_parts.append(
+            f'<text x="{notes_x + 3}" y="{notes_y + 24}" '
+            f'font-family="Arial" font-size="1.8">2. WELD PER SPEC</text>'
+        )
+        svg_parts.append(
+            f'<text x="{notes_x + 3}" y="{notes_y + 31}" '
+            f'font-family="Arial" font-size="1.8">3. AWS SYMBOLS</text>'
+        )
+
+        svg_parts.append('</g>')
+        return '\n'.join(svg_parts)
+
+    def generate(self) -> list[str]:
+        """
+        Generate the complete multi-page orthographic drawing.
+
+        Returns:
+            List of SVG strings, one per page
+        """
+        # Create view layout
+        self._create_view_layout()
+
+        # Clear and recreate pages
+        self._multi_page.pages = []
+
+        # Page 1: Orthographic views
+        views_page = self._create_views_page()
+        self._multi_page.add_page(views_page)
+
+        # Page 2: BOM and notes
+        bom_page = self._create_bom_page()
+        self._multi_page.add_page(bom_page)
+
+        return self._multi_page.generate_svgs()
+
+    def export_svg(self, filepath: str) -> list[str]:
+        """
+        Export the drawing as SVG file(s).
+
+        For multi-page drawings, creates separate files:
+        - filepath_page1.svg
+        - filepath_page2.svg
+
+        Args:
+            filepath: Base output path (without extension)
+
+        Returns:
+            List of created file paths
+        """
+        svgs = self.generate()
+
+        # Remove .svg extension if present
+        base_path = filepath
+        if base_path.endswith('.svg'):
+            base_path = base_path[:-4]
+
+        return self._multi_page.export_svg_files(base_path)
+
+    def export_pdf(self, filepath: str) -> None:
+        """
+        Export the drawing as a multi-page PDF.
+
+        Args:
+            filepath: Output PDF path
+        """
+        self.generate()  # Ensure pages are generated
+        self._multi_page.export_pdf(filepath)

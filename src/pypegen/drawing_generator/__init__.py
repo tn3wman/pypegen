@@ -46,15 +46,23 @@ from .constants import (
     SHEET_HEIGHT_MM,
     SHEET_WIDTH_MM,
 )
-from .drawing import EngineeringDrawing, PipingDrawing
+from .drawing import EngineeringDrawing, OrthographicPipingDrawing, PipingDrawing
+from .layout_engine import ViewLayoutEngine
+from .page import DrawingPage, MultiPageDrawing
 from .title_block import TitleBlock, TitleBlockInfo
 from .view_area import ViewArea
+from .view_projection import ViewProjection, create_standard_views
 
 __all__ = [
     # Main classes
     'PipingDrawing',
+    'OrthographicPipingDrawing',
     'EngineeringDrawing',
     'ViewArea',
+    'ViewProjection',
+    'ViewLayoutEngine',
+    'DrawingPage',
+    'MultiPageDrawing',
     'TitleBlock',
     'TitleBlockInfo',
     # BOM and coordinate classes
@@ -69,6 +77,7 @@ __all__ = [
     'BOMTable',
     # Functions
     'create_axis_indicator_svg',
+    'create_standard_views',
     'aggregate_components_to_bom',
     'get_free_directions',
     'get_perpendicular_directions',

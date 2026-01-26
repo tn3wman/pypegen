@@ -564,57 +564,54 @@
     </g>
     
 </g>
-<!-- Weld Markers -->
+<!-- Weld Markers (Diamond Style) -->
 
         <g class="weld-marker" id="weld-1">
             <!-- Leader line -->
-            <line x1="119.24173575649678" y1="80.2984186105779" x2="99.32315146945469" y2="93.2984186105779"
-                  stroke="#000000" stroke-width="0.3"/>
-            <!-- Weld point dot -->
-            <circle cx="119.24173575649678" cy="80.2984186105779" r="0.8"
+            <line x1="126.70" y1="84.57" x2="114.84" y2="91.41"
+                  stroke="#000000" stroke-width="0.25"/>
+            <!-- Weld point marker (small filled triangle pointing to weld) -->
+            <circle cx="126.70" cy="84.57" r="0.6"
                     fill="#000000"/>
-            <!-- Slot background (stadium/pill shape) -->
-            <rect x="86.26097364296362" y="91.2984186105779" width="14.0" height="8.0"
-                  rx="4.0" ry="4.0"
-                  fill="white" stroke="#000000" stroke-width="0.3"/>
+            <!-- Diamond background -->
+            <polygon points="112.26426044458032,89.40134489476198 115.76426044458032,92.90134489476198 112.26426044458032,96.40134489476198 108.76426044458032,92.90134489476198"
+                     fill="white" stroke="#000000" stroke-width="0.35"/>
             <!-- Weld label -->
-            <text x="93.26097364296362" y="96.1734186105779"
-                  text-anchor="middle" font-family="Arial" font-size="2.5"
-                  font-weight="bold">WELD 1</text>
+            <text x="112.26" y="93.88"
+                  text-anchor="middle" font-family="Arial" font-size="2.8"
+                  font-weight="bold">W1</text>
         </g>
 
         <g class="weld-marker" id="weld-2">
             <!-- Leader line -->
-            <line x1="314.3144679514877" y1="210.2737186918944" x2="294.3958836644456" y2="223.2737186918944"
-                  stroke="#000000" stroke-width="0.3"/>
-            <!-- Weld point dot -->
-            <circle cx="314.3144679514877" cy="210.2737186918944" r="0.8"
+            <line x1="306.75" y1="205.87" x2="294.89" y2="212.71"
+                  stroke="#000000" stroke-width="0.25"/>
+            <!-- Weld point marker (small filled triangle pointing to weld) -->
+            <circle cx="306.75" cy="205.87" r="0.6"
                     fill="#000000"/>
-            <!-- Slot background (stadium/pill shape) -->
-            <rect x="281.33370583795454" y="221.2737186918944" width="14.0" height="8.0"
-                  rx="4.0" ry="4.0"
-                  fill="white" stroke="#000000" stroke-width="0.3"/>
+            <!-- Diamond background -->
+            <polygon points="292.311447002141,210.70164215758717 295.811447002141,214.20164215758717 292.311447002141,217.70164215758717 288.811447002141,214.20164215758717"
+                     fill="white" stroke="#000000" stroke-width="0.35"/>
             <!-- Weld label -->
-            <text x="288.33370583795454" y="226.1487186918944"
-                  text-anchor="middle" font-family="Arial" font-size="2.5"
-                  font-weight="bold">WELD 2</text>
+            <text x="292.31" y="215.18"
+                  text-anchor="middle" font-family="Arial" font-size="2.8"
+                  font-weight="bold">W2</text>
         </g>
 
         <g class="weld-marker" id="weld-3">
             <!-- Leader line -->
-            <line x1="340.9662261751373" y1="192.76342764048673" x2="340.9662261751373" y2="218.76342764048673"
-                  stroke="#000000" stroke-width="0.3"/>
-            <!-- Weld point dot -->
-            <circle cx="340.9662261751373" cy="192.76342764048673" r="0.8"
+            <line x1="335.24" y1="189.42" x2="323.38" y2="196.27"
+                  stroke="#000000" stroke-width="0.25"/>
+            <!-- Weld point marker (small filled triangle pointing to weld) -->
+            <circle cx="335.24" cy="189.42" r="0.6"
                     fill="#000000"/>
-            <!-- Slot background (stadium/pill shape) -->
-            <rect x="333.9662261751373" y="218.76342764048673" width="14.0" height="8.0"
-                  rx="4.0" ry="4.0"
-                  fill="white" stroke="#000000" stroke-width="0.3"/>
+            <!-- Diamond background -->
+            <polygon points="320.80168299214426,194.25279673948282 324.30168299214426,197.75279673948282 320.80168299214426,201.25279673948282 317.30168299214426,197.75279673948282"
+                     fill="white" stroke="#000000" stroke-width="0.35"/>
             <!-- Weld label -->
-            <text x="340.9662261751373" y="223.63842764048673"
-                  text-anchor="middle" font-family="Arial" font-size="2.5"
-                  font-weight="bold">WELD 3</text>
+            <text x="320.80" y="198.73"
+                  text-anchor="middle" font-family="Arial" font-size="2.8"
+                  font-weight="bold">W3</text>
         </g>
 
 </svg>

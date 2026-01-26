@@ -68,6 +68,55 @@ THIN_LINE_WIDTH = 0.25
 PIPING_ISO_DIRECTION = (1, 1, 1)
 ROTATE_MODEL_FOR_PROJECTION = True  # Rotate 90 degrees around X axis
 
-# Alternative views for piping
-PLAN_VIEW_DIRECTION = (0, 0, 1)       # Top-down (plan view)
+# =============================================================================
+# ORTHOGRAPHIC VIEW DIRECTIONS (3rd Angle Projection)
+# =============================================================================
+# PyPeGen coordinate system: X=East, Y=North, Z=Up
+# CadQuery projectionDir = where camera is located relative to object
+
+# Individual view directions
+PLAN_VIEW_DIRECTION = (0, 0, 1)       # Top-down (plan view) - camera above
 ELEVATION_DIRECTION = (0, -1, 0)      # From South looking North (front elevation)
+RIGHT_SIDE_DIRECTION = (1, 0, 0)      # From East looking West (right side view)
+
+# View configuration for 3rd angle projection drawings
+# CadQuery projectionDir = direction FROM object TO camera (where camera is located)
+#
+# PyPeGen coordinates: X=East, Y=North, Z=Up
+# Orthographic views do NOT use model rotation - just projection direction
+# Only isometric uses the -90 rotation for piping convention
+#
+VIEW_DIRECTIONS: dict[str, tuple[float, float, float]] = {
+    "front": (0, -1, 0),      # Looking North: camera to South (-Y)
+    "top": (0, 0, 1),         # Looking Down: camera above (+Z)
+    "right": (1, 0, 0),       # Looking West: camera to East (+X)
+    "isometric": (1, 1, 1),   # Standard piping isometric (uses rotated model)
+}
+
+# Up vectors for each view (defines which direction is "up" on the drawing)
+# The up vector must NOT be parallel to the projection direction!
+VIEW_UP_VECTORS: dict[str, tuple[float, float, float]] = {
+    "front": (0, 0, 1),       # Z is up when looking North
+    "top": (0, 1, 0),         # Y (North) is up when looking down
+    "right": (0, 0, 1),       # Z is up when looking West
+    "isometric": (0, 0, 1),   # Z is up in isometric
+}
+
+# View labels for drawing annotations (using "Looking {direction}" convention)
+VIEW_LABELS: dict[str, str] = {
+    "front": "LOOKING NORTH",
+    "top": "LOOKING DOWN",
+    "right": "LOOKING WEST",
+    "isometric": "ISOMETRIC VIEW",
+}
+
+# =============================================================================
+# MULTI-VIEW LAYOUT CONSTANTS
+# =============================================================================
+
+# Minimum spacing between views (mm)
+VIEW_SPACING = 15.0
+
+# View label styling
+VIEW_LABEL_FONT_SIZE = 4.0
+VIEW_LABEL_OFFSET = 5.0  # Distance below view border
