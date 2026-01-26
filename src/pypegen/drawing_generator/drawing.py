@@ -1537,7 +1537,8 @@ class PipingDrawing:
                 view_area=self._model_view_area,
                 pipe_segments_2d=pipe_segments_2d,
                 placed_balloons=context.placed_balloons,
-                context=context
+                context=context,
+                world_to_svg_callback=self._get_svg_position_for_3d_point
             )
             context.placed_weld_markers = markers
 

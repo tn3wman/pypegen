@@ -11,7 +11,7 @@ This module provides:
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import cadquery as cq
 import numpy as np
@@ -507,18 +507,22 @@ def _leader_crosses_pipe(
 
 # Weld marker styling constants
 #
-# NOTE: Weld markers render as a fixed-size "slot" (pill) label. `WELD_MARKER_SIZE`
-# is used as a collision radius for placement/optimization; keep it consistent
-# with the rendered slot dimensions.
-WELD_MARKER_SLOT_HEIGHT = BALLOON_RADIUS * 2  # mm - slot height (matches balloon diameter)
-WELD_MARKER_SLOT_WIDTH = 14.0                # mm - slot width to fit "WELD #"
-WELD_MARKER_SIZE = math.hypot(               # mm - collision radius (half-diagonal)
-    WELD_MARKER_SLOT_WIDTH / 2,
-    WELD_MARKER_SLOT_HEIGHT / 2,
-)
-WELD_MARKER_OFFSET = 18.0      # mm - offset from weld point to label (increased for clarity)
-WELD_MARKER_STROKE = 0.3       # mm - stroke width
-WELD_FONT_SIZE = 2.5           # mm - font size for weld number
+# Professional piping isometric weld callouts use diamond-shaped or flag-style
+# markers with short leaders perpendicular to the pipe. This provides clear
+# identification without cluttering the drawing.
+#
+# Style: Diamond/flag shape with "W#" label (matching industry convention)
+
+WELD_MARKER_RADIUS = 3.5       # mm - radius of weld marker circle (slightly smaller than BOM balloons)
+WELD_MARKER_SIZE = WELD_MARKER_RADIUS * 2  # mm - collision diameter
+WELD_MARKER_OFFSET = 10.0      # mm - offset from weld point to label (shorter for cleaner look)
+WELD_MARKER_STROKE = 0.35      # mm - stroke width (match BOM balloons)
+WELD_FONT_SIZE = 2.8           # mm - font size for weld number (slightly smaller than BOM)
+WELD_LEADER_STROKE = 0.25      # mm - leader line stroke width
+
+# Legacy slot dimensions (kept for backwards compatibility in collision calculations)
+WELD_MARKER_SLOT_HEIGHT = WELD_MARKER_RADIUS * 2
+WELD_MARKER_SLOT_WIDTH = WELD_MARKER_RADIUS * 2
 
 
 # =============================================================================
@@ -2162,10 +2166,14 @@ def aggregate_components_to_bom(
 
 def render_weld_markers_svg(weld_markers: list[WeldMarker]) -> str:
     """
-    Render weld markers as SVG elements.
+    Render weld markers as SVG elements using professional piping isometric style.
 
-    Each weld marker is a slot shape (stadium/pill shape) with "WELD #" inside,
-    connected to the weld location by a leader line.
+    Each weld marker is rendered as a diamond (rotated square) with "W#" inside,
+    connected to the weld location by a short leader line. This matches industry
+    conventions for piping fabrication drawings per ASME B31.3.
+
+    The diamond shape distinguishes weld markers from BOM balloons (circles),
+    making the drawing easier to read.
 
     Args:
         weld_markers: List of WeldMarker objects with positions set
@@ -2176,50 +2184,52 @@ def render_weld_markers_svg(weld_markers: list[WeldMarker]) -> str:
     if not weld_markers:
         return ""
 
-    svg_parts = ['<!-- Weld Markers -->']
+    svg_parts = ['<!-- Weld Markers (Diamond Style) -->']
 
-    # Slot dimensions - height matches BOM balloon diameter
-    slot_height = WELD_MARKER_SLOT_HEIGHT
-    slot_radius = slot_height / 2  # Radius for rounded ends
-    slot_width = WELD_MARKER_SLOT_WIDTH
+    # Diamond dimensions
+    diamond_size = WELD_MARKER_RADIUS * 2  # Full width/height of diamond
+    half_size = WELD_MARKER_RADIUS
 
     for marker in weld_markers:
         wx, wy = marker.position
         lx, ly = marker.label_position
 
-        # Slot rectangle bounds (centered on label position)
-        slot_left = lx - slot_width / 2
-        slot_top = ly - slot_height / 2
-
-        # Leader line from weld point to slot edge
-        # Calculate point on slot edge closest to weld point
+        # Calculate leader end point (on diamond edge toward weld)
         dx = wx - lx
         dy = wy - ly
         dist = math.sqrt(dx * dx + dy * dy)
         if dist > 0:
-            # Approximate edge point (use slot_radius for simplicity)
-            edge_x = lx + (dx / dist) * (slot_width / 2)
-            edge_y = ly + (dy / dist) * slot_radius
+            # Find edge intersection - diamond edge is at 45 degrees
+            # For a diamond centered at (lx, ly) with half-diagonal 'half_size',
+            # the edge point in direction (dx, dy) is approximately:
+            ndx, ndy = dx / dist, dy / dist
+            # Diamond edge distance is half_size / max(|cos|+|sin|) for 45-deg rotation
+            # Simplified: use half_size * 0.707 (average)
+            edge_dist = half_size * 0.85
+            edge_x = lx + ndx * edge_dist
+            edge_y = ly + ndy * edge_dist
         else:
             edge_x, edge_y = lx, ly
 
-        # Label text: "WELD #" instead of "W#"
-        label_text = f"WELD {marker.weld_number}"
+        # Label text: "W#" format (compact, standard industry convention)
+        label_text = f"W{marker.weld_number}"
+
+        # Diamond points (rotated square): top, right, bottom, left
+        points = f"{lx},{ly - half_size} {lx + half_size},{ly} {lx},{ly + half_size} {lx - half_size},{ly}"
 
         svg_parts.append(f'''
         <g class="weld-marker" id="weld-{marker.weld_number}">
             <!-- Leader line -->
-            <line x1="{wx}" y1="{wy}" x2="{edge_x}" y2="{edge_y}"
-                  stroke="#000000" stroke-width="{WELD_MARKER_STROKE}"/>
-            <!-- Weld point dot -->
-            <circle cx="{wx}" cy="{wy}" r="0.8"
+            <line x1="{wx:.2f}" y1="{wy:.2f}" x2="{edge_x:.2f}" y2="{edge_y:.2f}"
+                  stroke="#000000" stroke-width="{WELD_LEADER_STROKE}"/>
+            <!-- Weld point marker (small filled triangle pointing to weld) -->
+            <circle cx="{wx:.2f}" cy="{wy:.2f}" r="0.6"
                     fill="#000000"/>
-            <!-- Slot background (stadium/pill shape) -->
-            <rect x="{slot_left}" y="{slot_top}" width="{slot_width}" height="{slot_height}"
-                  rx="{slot_radius}" ry="{slot_radius}"
-                  fill="white" stroke="#000000" stroke-width="{WELD_MARKER_STROKE}"/>
+            <!-- Diamond background -->
+            <polygon points="{points}"
+                     fill="white" stroke="#000000" stroke-width="{WELD_MARKER_STROKE}"/>
             <!-- Weld label -->
-            <text x="{lx}" y="{ly + WELD_FONT_SIZE * 0.35}"
+            <text x="{lx:.2f}" y="{ly + WELD_FONT_SIZE * 0.35:.2f}"
                   text-anchor="middle" font-family="Arial" font-size="{WELD_FONT_SIZE}"
                   font-weight="bold">{label_text}</text>
         </g>''')
@@ -2234,7 +2244,8 @@ def create_weld_markers(
     existing_markers: list[WeldMarker] | None = None,
     pipe_segments_2d: list[tuple[tuple[float, float], tuple[float, float]]] | None = None,
     placed_balloons: list['Balloon'] | None = None,
-    context: AnnotationPlacementContext | None = None
+    context: AnnotationPlacementContext | None = None,
+    world_to_svg_callback: 'Optional[Callable[[float, float, float], tuple[float, float] | None]]' = None
 ) -> list[WeldMarker]:
     """
     Create WeldMarker objects from WeldRecords with smart placement.
@@ -2252,6 +2263,9 @@ def create_weld_markers(
         pipe_segments_2d: 2D pipe segments for collision detection
         placed_balloons: Already placed BOM balloons to avoid
         context: Optional AnnotationPlacementContext for scale-aware sizing
+        world_to_svg_callback: Optional callback for more accurate 3D to 2D conversion.
+                              If provided, uses CadQuery rendering pipeline instead of
+                              mathematical projection.
 
     Returns:
         List of WeldMarker objects ready for rendering
@@ -2357,13 +2371,22 @@ def create_weld_markers(
     ]
 
     for weld in welds:
-        # Project 3D weld position to 2D (may already be on OD via attachment points)
+        # Project 3D weld position to 2D
+        # Use callback if provided (more accurate CadQuery rendering approach),
+        # otherwise fall back to mathematical projection
         x3d, y3d, z3d = weld.world_position_3d
-        svg_weld = coord_mapper.world_to_svg(x3d, y3d, z3d)
+        
+        if world_to_svg_callback is not None:
+            svg_weld = world_to_svg_callback(x3d, y3d, z3d)
+        else:
+            svg_weld = coord_mapper.world_to_svg(x3d, y3d, z3d)
+            
         if svg_weld is None:
+            print(f"  W{weld.weld_number}: 3D=({x3d:.1f}, {y3d:.1f}, {z3d:.1f}) -> PROJECTION FAILED")
             continue
 
         weld_x, weld_y = svg_weld
+        print(f"  W{weld.weld_number}: 3D=({x3d:.1f}, {y3d:.1f}, {z3d:.1f}) -> SVG=({weld_x:.1f}, {weld_y:.1f})")
 
         # Preferred label direction in screen space
         if weld.pipe_direction:
