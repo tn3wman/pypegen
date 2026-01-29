@@ -73,6 +73,7 @@ def main():
         welds=route.welds,
         show_balloons=True,
         show_welds=True,
+        show_dimensions=True,  # Enable dimensions
         primary_annotation_view="front",  # Balloons on front view
     )
 

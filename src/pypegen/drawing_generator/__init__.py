@@ -39,6 +39,18 @@ from .bom import (
     get_free_directions,
     get_perpendicular_directions,
 )
+from .dimensions import (
+    DimensionPlacer,
+    DimensionPlacementContext,
+    DimensionPoint,
+    DimensionRecord,
+    DimensionStyle,
+    generate_centerline_dimensions,
+    generate_pipe_dimensions,
+    generate_pipe_length_dimensions,
+    render_all_dimensions_svg,
+    render_dimension_svg,
+)
 from .constants import (
     DRAWING_AREA_HEIGHT,
     DRAWING_AREA_WIDTH,
@@ -75,12 +87,23 @@ __all__ = [
     'BalloonPlacer',
     'TopologyBalloonPlacer',
     'BOMTable',
+    # Dimension classes
+    'DimensionPoint',
+    'DimensionRecord',
+    'DimensionStyle',
+    'DimensionPlacer',
+    'DimensionPlacementContext',
     # Functions
     'create_axis_indicator_svg',
     'create_standard_views',
     'aggregate_components_to_bom',
     'get_free_directions',
     'get_perpendicular_directions',
+    'generate_pipe_dimensions',
+    'generate_centerline_dimensions',
+    'generate_pipe_length_dimensions',
+    'render_dimension_svg',
+    'render_all_dimensions_svg',
     # Constants
     'SHEET_WIDTH_MM',
     'SHEET_HEIGHT_MM',

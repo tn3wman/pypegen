@@ -37,6 +37,14 @@ from .bom import (
     render_all_balloons_svg,
     render_weld_markers_svg,
 )
+from .dimensions import (
+    DimensionPlacer,
+    DimensionPlacementContext,
+    DimensionRecord,
+    DimensionStyle,
+    generate_pipe_dimensions,
+    render_all_dimensions_svg,
+)
 from .constants import (
     BOM_WIDTH,
     BOM_X,
@@ -513,6 +521,9 @@ class PipingDrawing:
     show_bom: bool = True
     show_balloons: bool = True
     show_welds: bool = True
+    show_dimensions: bool = False  # Show dimension annotations
+    dimension_types: list[str] = field(default_factory=lambda: ["centerline", "pipe_length"])
+    dimension_style: DimensionStyle = field(default_factory=DimensionStyle)
     show_debug: bool = True  # Show debug markers (component centers, bounds, attachment points)
 
     # Internal state - initialized in __post_init__
@@ -1558,6 +1569,66 @@ class PipingDrawing:
 
         return '\n'.join(svg_parts)
 
+    def _create_dimensions(self) -> str:
+        """Create dimension annotations for the piping drawing.
+
+        Generates centerline-to-centerline and pipe cut-length dimensions
+        following ASME Y14.5 standards.
+
+        Returns:
+            SVG string for all dimensions
+        """
+        if not self.show_dimensions or not self.components:
+            return ""
+
+        print("\n--- Creating Dimensions ---")
+
+        # Generate dimensions from components
+        dimensions = generate_pipe_dimensions(
+            self.components,
+            self.dimension_types,
+        )
+
+        if not dimensions:
+            print("  No dimensions generated")
+            return ""
+
+        print(f"  Generated {len(dimensions)} dimensions")
+
+        # Compute geometry bounds for placement
+        geometry_bounds = None
+        if self.components:
+            all_x = []
+            all_y = []
+            for comp in self.components:
+                if comp.svg_bounds_2d:
+                    min_x, min_y, max_x, max_y = comp.svg_bounds_2d
+                    all_x.extend([min_x, max_x])
+                    all_y.extend([min_y, max_y])
+            if all_x and all_y:
+                geometry_bounds = (min(all_x), min(all_y), max(all_x), max(all_y))
+
+        # Create placement context
+        context = DimensionPlacementContext(
+            view_area=self._model_view_area,
+            fit_scale=self._fit_scale,
+            geometry_bounds_2d=geometry_bounds,
+            coord_mapper=self._coord_mapper,
+            components=self.components,
+        )
+
+        # Place dimensions
+        placer = DimensionPlacer(context, self.dimension_style)
+        dimensions = placer.place_dimensions(dimensions)
+
+        # Render SVG
+        dim_svg = render_all_dimensions_svg(dimensions, self.dimension_style)
+
+        for dim in dimensions:
+            print(f"  Dim {dim.dimension_id}: {dim.dimension_type} = {dim.display_value}")
+
+        return dim_svg
+
     def _create_attachment_point_debug_markers(self) -> str:
         """Create debug markers showing ALL attachment points on all fittings.
 
@@ -1713,6 +1784,11 @@ class PipingDrawing:
         # Add annotations (balloons + weld markers) after geometry to render on top
         svg_content.append(self._create_annotations())
 
+        # Add dimensions after annotations (only if enabled)
+        dimensions_svg = self._create_dimensions()
+        if dimensions_svg:
+            svg_content.append(dimensions_svg)
+
         # Add debug markers for attachment point positions (only if show_debug is enabled)
         if self.show_debug:
             svg_content.append(self._create_attachment_point_debug_markers())
@@ -1826,6 +1902,9 @@ class OrthographicPipingDrawing:
     welds: list[WeldRecord] = field(default_factory=list)
     show_balloons: bool = True
     show_welds: bool = True
+    show_dimensions: bool = False  # Show dimension annotations
+    dimension_types: list[str] = field(default_factory=lambda: ["centerline", "pipe_length"])
+    dimension_style: DimensionStyle = field(default_factory=DimensionStyle)
     primary_annotation_view: str = "front"  # View for balloons
 
     # Internal state
@@ -2013,6 +2092,14 @@ class OrthographicPipingDrawing:
             )
             page.add_element(annotation_svg)
 
+        # Add dimensions to each view
+        if self.show_dimensions:
+            for view_name in ["front", "top", "right", "isometric"]:
+                if view_name in self._views:
+                    dim_svg = self._create_view_dimensions(self._views[view_name])
+                    if dim_svg:
+                        page.add_element(dim_svg)
+
         # Add notes section on page 1
         notes_svg = self._create_notes_section()
         page.add_element(notes_svg)
@@ -2071,6 +2158,272 @@ class OrthographicPipingDrawing:
         if balloons:
             return render_all_balloons_svg(balloons)
         return ""
+
+    def _create_view_dimensions(self, view: ViewProjection) -> str:
+        """Create dimension annotations for a specific orthographic view.
+
+        Generates centerline-to-centerline and pipe cut-length dimensions
+        appropriate for the given view direction.
+
+        Args:
+            view: The ViewProjection to create dimensions for
+
+        Returns:
+            SVG string for dimensions in this view
+        """
+        if not self.show_dimensions or not self.components:
+            return ""
+
+        # Generate dimensions from components
+        dimensions = generate_pipe_dimensions(
+            self.components,
+            self.dimension_types,
+        )
+
+        if not dimensions:
+            return ""
+
+        # Filter dimensions appropriate for this view
+        # For orthographic views, we only show dimensions where the measurement
+        # direction is visible (not foreshortened) in this view
+        view_dimensions = self._filter_dimensions_for_view(dimensions, view)
+
+        if not view_dimensions:
+            return ""
+
+        # Create a coordinate mapper that applies the same model rotation as
+        # _render_single_view() does when rendering geometry.
+        # This is crucial for dimension endpoints to align with the geometry.
+        coord_mapper = self._create_view_coord_mapper(view)
+
+        # Compute geometry bounds for this view
+        geometry_bounds = None
+        all_x = []
+        all_y = []
+        for comp in self.components:
+            if comp.world_position_3d:
+                svg_pos = coord_mapper.world_to_svg(*comp.world_position_3d)
+                all_x.append(svg_pos[0])
+                all_y.append(svg_pos[1])
+        if all_x and all_y:
+            margin = 20
+            geometry_bounds = (
+                min(all_x) - margin,
+                min(all_y) - margin,
+                max(all_x) + margin,
+                max(all_y) + margin,
+            )
+
+        # Create placement context
+        context = DimensionPlacementContext(
+            view_area=view.view_area,
+            fit_scale=view._fit_scale,
+            geometry_bounds_2d=geometry_bounds,
+            coord_mapper=coord_mapper,
+            components=self.components,
+        )
+
+        # Place dimensions
+        placer = DimensionPlacer(context, self.dimension_style)
+        view_dimensions = placer.place_dimensions(view_dimensions)
+
+        # Render SVG
+        return render_all_dimensions_svg(
+            view_dimensions,
+            self.dimension_style,
+            group_id=f"dimensions-{view.name}",
+        )
+
+    def _create_view_coord_mapper(self, view: ViewProjection):
+        """Create a coordinate mapper for a specific view.
+
+        This creates a mapper that applies the correct coordinate transformation
+        for each view type. The transformation combines the model rotation applied
+        in _render_single_view() with CadQuery's projection behavior.
+
+        CadQuery's orthographic projection for projectionDir=(dx,dy,dz):
+        - Looking along the projection direction
+        - The geometry coordinates perpendicular to the view direction map to screen
+
+        After extensive testing, the effective mappings are:
+        - Front (Looking North, projectionDir=(0,-1,0) + 90° Y rotation):
+            screen_X = world_X (East goes right)
+            screen_Y = world_Z (Up goes up, after SVG Y-flip)
+        - Top (Looking Down, projectionDir=(0,0,1), no rotation):
+            screen_X = world_X (East goes right)
+            screen_Y = world_Y (North goes up, after SVG Y-flip)
+        - Right (Looking West, projectionDir=(1,0,0) + 90° X rotation):
+            screen_X = world_Y (North goes right)
+            screen_Y = world_Z (Up goes up, after SVG Y-flip)
+        - Isometric: Uses standard isometric projection with -90° X rotation
+
+        Returns:
+            A callable that converts (x, y, z) world coords to (svg_x, svg_y)
+        """
+
+        class ViewCoordMapper:
+            """Custom coordinate mapper with correct per-view transformations."""
+
+            def __init__(self, view_obj: ViewProjection, view_name: str):
+                self.view = view_obj
+                self.view_name = view_name
+
+            def world_to_svg(self, x: float, y: float, z: float) -> tuple[float, float]:
+                """Convert world coordinates to SVG coordinates for this view.
+
+                This applies the same transform that _render_single_view() uses:
+                  translate(view_cx, view_cy) scale(s, -s) translate(-gcx, -gcy)
+
+                Where gcx, gcy are the geometry center coordinates extracted from
+                CadQuery's raw SVG path coordinates.
+                """
+                # Apply the effective world-to-screen mapping for each view
+                # These mappings account for both model rotation and CadQuery projection
+                if self.view_name == "front":
+                    # Front view: looking North (-Y direction)
+                    # After +90° Y rotation: Screen X = world X, Screen Y = world Z
+                    raw_x = x
+                    raw_y = z
+                elif self.view_name == "top":
+                    # Top view: looking Down (-Z direction)
+                    # No model rotation: Screen X = world X, Screen Y = world Y
+                    # But CadQuery maps it as Y going down, so raw_y = -y
+                    raw_x = x
+                    raw_y = -y
+                elif self.view_name == "right":
+                    # Right view: looking West (-X direction)
+                    # After +90° X rotation: Screen X = -world Y, Screen Y = world Z
+                    raw_x = -y
+                    raw_y = z
+                elif self.view_name == "isometric":
+                    # Isometric: apply -90 X rotation then standard iso projection
+                    # (x, y, z) -> (x, -z, y) -> iso projection
+                    rx, ry, rz = x, -z, y
+                    sqrt2 = 1.4142135623730951
+                    sqrt6 = 2.449489742783178
+                    raw_x = (rx - ry) / sqrt2
+                    raw_y = (-rx - ry + 2 * rz) / sqrt6
+                else:
+                    # Default: treat like front view
+                    raw_x = x
+                    raw_y = z
+
+                # Apply the drawing's actual transform:
+                # translate(view_cx, view_cy) scale(s, -s) translate(-gcx, -gcy)
+                #
+                # The path coordinates in CadQuery's raw SVG are in raw projection
+                # space (world coordinates mapped through the view projection).
+                # The geometry center (gcx, gcy) is computed from these path
+                # coordinates, so it's also in raw projection space.
+                #
+                # Our raw_x, raw_y are now in the same coordinate space as the
+                # path data (raw projection space), so we can directly use them.
+                #
+                # Transform steps for point (raw_x, raw_y):
+                #   1. translate(-gcx, -gcy): (raw_x - gcx, raw_y - gcy)
+                #   2. scale(s, -s): ((raw_x - gcx) * s, (raw_y - gcy) * -s)
+                #   3. translate(view_cx, view_cy):
+                #        x_final = view_cx + (raw_x - gcx) * s
+                #        y_final = view_cy - (raw_y - gcy) * s
+                gcx = self.view._geometry_center_x
+                gcy = self.view._geometry_center_y
+                fit_scale = self.view._fit_scale
+                view_cx = self.view.view_area.center_x
+                view_cy = self.view.view_area.center_y
+
+                # Apply the fit transform directly (same as _render_single_view)
+                # No CadQuery scale/translate needed because raw_x/raw_y are
+                # already in the same coordinate space as gcx/gcy
+                svg_x = view_cx + (raw_x - gcx) * fit_scale
+                svg_y = view_cy - (raw_y - gcy) * fit_scale
+
+                return (svg_x, svg_y)
+
+        return ViewCoordMapper(view, view.name)
+
+    def _filter_dimensions_for_view(
+        self,
+        dimensions: list[DimensionRecord],
+        view: ViewProjection,
+    ) -> list[DimensionRecord]:
+        """Filter dimensions to only those visible in the given view.
+
+        For orthographic projections, we only show dimensions where the
+        measurement axis is not perpendicular to the view direction.
+
+        Args:
+            dimensions: All generated dimensions
+            view: The view to filter for
+
+        Returns:
+            Filtered list of dimensions appropriate for this view
+        """
+        # Mapping of view names to the pipe directions they can show
+        # Front view (looking -Y): shows E-W (horizontal) and Up-Down (vertical)
+        # Top view (looking -Z): shows E-W (horizontal) and N-S (vertical)
+        # Right view (looking -X): shows N-S (horizontal) and Up-Down (vertical)
+        # Isometric: shows all
+        view_visible_directions = {
+            "front": ["east", "west", "up", "down"],
+            "top": ["east", "west", "north", "south"],
+            "right": ["north", "south", "up", "down"],
+            "isometric": ["east", "west", "north", "south", "up", "down"],
+        }
+
+        visible_dirs = view_visible_directions.get(view.name, [])
+        if not visible_dirs:
+            return dimensions  # Unknown view, show all
+
+        filtered = []
+        for dim in dimensions:
+            # Check if the pipe direction for this dimension is visible
+            if dim.pipe_direction in visible_dirs:
+                # Update dimension direction for orthographic views
+                if view.name != "isometric":
+                    dim.direction = self._get_ortho_dimension_direction(
+                        dim.pipe_direction, view.name
+                    )
+                filtered.append(dim)
+
+        return filtered
+
+    def _get_ortho_dimension_direction(
+        self,
+        pipe_direction: str | None,
+        view_name: str,
+    ) -> str:
+        """Get the dimension direction for an orthographic view.
+
+        Args:
+            pipe_direction: The world direction of the pipe
+            view_name: The view name ("front", "top", "right")
+
+        Returns:
+            "horizontal" or "vertical"
+        """
+        if pipe_direction is None:
+            return "horizontal"
+
+        # Mapping: (view_name, pipe_direction) -> dimension_direction
+        # Front view (looking North): E-W -> horizontal, Up-Down -> vertical
+        # Top view (looking Down): E-W -> horizontal, N-S -> vertical
+        # Right view (looking West): N-S -> horizontal, Up-Down -> vertical
+        direction_map = {
+            ("front", "east"): "horizontal",
+            ("front", "west"): "horizontal",
+            ("front", "up"): "vertical",
+            ("front", "down"): "vertical",
+            ("top", "east"): "horizontal",
+            ("top", "west"): "horizontal",
+            ("top", "north"): "vertical",
+            ("top", "south"): "vertical",
+            ("right", "north"): "horizontal",
+            ("right", "south"): "horizontal",
+            ("right", "up"): "vertical",
+            ("right", "down"): "vertical",
+        }
+
+        return direction_map.get((view_name, pipe_direction), "horizontal")
 
     def _create_bom_page(self) -> DrawingPage:
         """Create Page 2 with BOM and notes."""
